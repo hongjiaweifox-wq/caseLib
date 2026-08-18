@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>设备控制台 · 家庭维度</title>
+  <link rel="icon" href="/app-icon-20260806.png" type="image/png" sizes="32x32" />
+  <link rel="shortcut icon" href="/app-icon-20260806.png" />
+  <link rel="apple-touch-icon" href="/app-icon-20260806.png" />
+  <link rel="icon" href="/favicon.svg?v=20260806-57" type="image/svg+xml" />
+  <link rel="stylesheet" href="/style.css?v=20260818-caselib44" />
+</head>
+<body>
+  <div id="app" class="layout">
+    <div class="topright-actions">
+      <button type="button" class="btn btn-ghost btn-sm" id="btnLogin">数据区登录态</button>
+    </div>
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">
+        <span class="sidebar-head-title">家庭列表</span>
+        <button type="button" class="icon-btn" id="btnAddHome" title="新增家庭" aria-label="新增家庭">＋</button>
+      </div>
+      <nav class="home-list" id="homeList"></nav>
+    </aside>
+
+    <button type="button" class="sidebar-toggle" id="btnToggleSidebar" title="折叠/展开左侧栏" aria-label="折叠左侧栏">
+      <span class="sidebar-toggle-icon" aria-hidden="true">‹</span>
+    </button>
+
+    <!-- Main -->
+    <main class="main">
+      <div id="emptyState" class="empty-state hidden">
+        <h2>还没有家庭</h2>
+        <p>先选择环境并粘贴 Cookie，再新增家庭与设备。</p>
+        <button type="button" class="btn btn-primary" id="btnEmptyAdd">+ 新增家庭</button>
+      </div>
+
+      <div id="homeView" class="hidden">
+        <header class="main-header">
+          <div class="home-head-title">
+            <h2 id="homeTitle">—</h2>
+            <p class="meta" id="homeMeta"></p>
+          </div>
+          <div class="header-actions">
+            <div class="header-actions-group header-actions-ops">
+              <button type="button" class="btn btn-ghost" id="btnReadAll">一键读取</button>
+              <button type="button" class="btn btn-primary" id="btnIssueAll" disabled>一键下发</button>
+              <button type="button" class="btn btn-ghost" id="btnSaveSnapshot" title="将当前实时运行情况截图保存到本机浏览器">保存快照</button>
+              <button type="button" class="btn btn-ghost" id="btnAutoTest" title="按 S1–S13 软下发排列组合，自动跑工况并出报告">自动回归测试</button>
+            </div>
+            <button type="button" class="btn btn-ghost" id="btnRefreshDevices">刷新设备</button>
+            <button type="button" class="btn btn-ghost" id="btnAddMeter">+ 添加电表</button>
+            <button type="button" class="btn btn-ghost" id="btnEditHome">编辑家庭</button>
+            <button type="button" class="btn btn-danger-outline" id="btnDeleteHome">删除家庭</button>
+          </div>
+        </header>
+
+        <div id="cookieBanner" class="alert alert-warn hidden">
+          <span id="cookieBannerText">当前环境尚未配置 Cookie。可点「自动获取」从本机浏览器 SSO 填入，或手动粘贴。</span>
+          <button type="button" class="btn btn-sm" id="btnAutoCookieBanner">自动获取</button>
+        </div>
+
+        <div class="home-tabs" id="homeTabs" role="tablist">
+          <button type="button" class="home-tab active" data-tab="live" role="tab" aria-selected="true">实时运行情况</button>
+          <button type="button" class="home-tab" data-tab="charts" role="tab" aria-selected="false">历史趋势图表</button>
+          <button type="button" class="home-tab" data-tab="election" role="tab" aria-selected="false">集群选举趋势</button>
+          <button type="button" class="home-tab" data-tab="snapshots" role="tab" aria-selected="false">运行快照</button>
+        </div>
+
+        <div id="tabLive" class="home-tab-panel" role="tabpanel">
+          <div id="flowHost" class="flow-host"></div>
+        </div>
+        <div id="tabCharts" class="home-tab-panel hidden" role="tabpanel">
+          <div class="charts-head">
+            <h3>历史趋势</h3>
+            <p>电表功率与各机 SOC · 每图一行 · 拖拽缩放时各图时间轴同步</p>
+          </div>
+          <div id="chartsHost" class="charts-host flow-soc-row"></div>
+        </div>
+        <div id="tabElection" class="home-tab-panel hidden" role="tabpanel">
+          <div class="charts-head election-head">
+            <div>
+              <h3>集群选举趋势</h3>
+              <p>按 reportTime 时间轴记录主机 deviceId · 切换点高亮 · 查询带 <code>code=device_cluster_role</code></p>
+            </div>
+            <div class="election-toolbar">
+              <label class="election-interval">
+                周期
+                <input type="number" id="electionIntervalSec" min="1" max="3600" step="1" value="5" />
+                <span>s</span>
+              </label>
+              <button type="button" class="btn btn-ghost btn-sm" id="btnElectionApplyInterval">应用周期</button>
+              <button type="button" class="auto-refresh-switch election-poll-switch" id="btnElectionPollToggle"
+                role="switch" aria-checked="false" title="开启后按周期轮询">
+                <span class="auto-refresh-text" id="electionPollLabel">轮询</span>
+                <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
+              </button>
+              <button type="button" class="btn btn-primary btn-sm" id="btnElectionPollOnce">立即采样</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="btnElectionExpandAll">全部展开</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="btnElectionCollapseAll">全部折叠</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="btnElectionRefresh">刷新列表</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="btnElectionDownload">下载 CSV</button>
+              <button type="button" class="btn btn-danger-outline btn-sm" id="btnElectionClear">清空记录</button>
+            </div>
+          </div>
+          <div id="electionSummary" class="election-summary"></div>
+          <div id="electionHost" class="election-host"></div>
+        </div>
+        <div id="tabSnapshots" class="home-tab-panel hidden" role="tabpanel">
+          <div class="charts-head snap-head">
+            <div>
+              <h3>运行快照</h3>
+              <p>截图保存在本机浏览器 localStorage（不上传服务器）· 最多保留 <span id="snapMaxHint">12</span> 条</p>
+            </div>
+            <div class="snap-head-actions">
+              <button type="button" class="btn btn-ghost btn-sm" id="btnSnapRefresh">刷新列表</button>
+              <button type="button" class="btn btn-danger-outline btn-sm" id="btnSnapClearAll">清空全部</button>
+            </div>
+          </div>
+          <div id="snapshotsHost" class="snapshots-host"></div>
+        </div>
+      </div>
+
+      <!-- Sub-page: 数据区登录态（分组表格，占据主区） -->
+      <section id="loginMgrView" class="hidden">
+        <div class="loginmgr-head">
+          <div class="loginmgr-title">
+            <button type="button" class="btn btn-ghost" id="btnLoginMgrBack">‹ 返回</button>
+            <h2>数据区登录态</h2>
+          </div>
+          <div class="loginmgr-actions">
+            <button type="button" class="btn btn-primary" id="btnLoginMgrAuto">自动获取(本机)</button>
+          </div>
+        </div>
+        <p class="hint" id="loginMgrHint"></p>
+        <div id="loginMgrBody"></div>
+      </section>
+
+      <!-- Sub-page: 自动回归测试（按 S1–S13 软下发排列组合，自动跑工况并出报告） -->
+      <section id="autoTestView" class="hidden">
+        <div class="loginmgr-head">
+          <div class="loginmgr-title">
+            <button type="button" class="btn btn-ghost" id="btnAutoTestBack">‹ 返回</button>
+            <h2>自动回归测试</h2>
+          </div>
+          <div class="loginmgr-actions">
+            <label class="at-opt">周期(秒)<input type="number" id="atSettle" min="3" max="120" step="1" value="15" /></label>
+            <label class="at-opt" title="家庭电网购电限值(规划中·非可读点位)。填了才启用充2抑制条件一：充1需求>电网限+三方光伏。留空则仅用条件二(可放总+三方)。">电网购电限(W)<input type="number" id="atGridBuyLimit" min="0" step="100" placeholder="留空=不用" style="width:96px" /></label>
+            <label class="at-opt" title="三方光伏(W)。默认取各机 bypass 口三方光伏倒灌之和；可手动覆盖。">三方光伏(W)<input type="number" id="atThirdPv" min="0" step="100" placeholder="默认实测" style="width:88px" /></label>
+            <label class="at-opt"><input type="checkbox" id="atRestore" checked /> 结束后恢复原参数</label>
+            <button type="button" class="btn btn-ghost" id="btnAutoTestReload">刷新矩阵</button>
+            <button type="button" class="btn btn-primary" id="btnAutoTestRun">开始自动测试</button>
+          </div>
+        </div>
+        <p class="hint" id="autoTestHint"></p>
+        <div id="autoTestProgress" class="at-progress hidden"></div>
+        <div id="autoTestTimeline" class="at-timeline hidden"></div>
+        <div id="autoTestBody"></div>
+        <div id="autoTestReport" class="at-report hidden"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Modal: login / cookie -->
+  <dialog id="dlgLogin" class="modal">
+    <form method="dialog" id="formLogin" class="modal-card">
+      <h3>数据区登录态</h3>
+      <label>
+        环境
+        <select id="loginEnv" required></select>
+      </label>
+      <label>
+        Cookie（本机可自动获取；虚拟机请由本机推送或手动粘贴）
+        <textarea id="loginCookie" rows="6" placeholder="SSO_USER_TOKEN=...; COOKICE_USER_TOKEN_PC=..."></textarea>
+      </label>
+      <p class="hint" id="loginHint"></p>
+      <div id="remotePushRow" class="remote-push-row hidden">
+        <label class="remote-push-label">
+          虚拟机地址
+          <input type="url" id="remotePushUrl" placeholder="http://172.16.239.236:5178" />
+        </label>
+        <button type="button" class="btn btn-ghost" id="btnPushCookies" title="把本机已保存的 cookies 推送到虚拟机 store">推送到虚拟机</button>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="btnAutoCookie" title="调用本机 tuya-sso-token，从 Chrome / Cursor 等读取 SSO_USER_TOKEN">自动获取</button>
+        <button type="submit" class="btn btn-primary" value="ok">保存</button>
+        <button type="button" class="btn btn-ghost" id="btnLoginCancel">取消</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Modal: home -->
+  <dialog id="dlgHome" class="modal">
+    <form method="dialog" id="formHome" class="modal-card">
+      <h3 id="dlgHomeTitle">新增家庭</h3>
+      <label>
+        环境
+        <select id="homeEnv" required></select>
+        <span class="hint" id="homeEnvHint" hidden>环境创建后与家庭绑定，不可修改</span>
+      </label>
+      <label>
+        家庭 ID
+        <input type="text" id="homeId" required placeholder="例如 243918001" />
+      </label>
+      <label>
+        显示名称（可选）
+        <input type="text" id="homeName" placeholder="留空则用「环境短名 / 家庭ID」" />
+      </label>
+      <div class="modal-actions">
+        <button type="submit" class="btn btn-primary" value="ok">保存</button>
+        <button type="button" class="btn btn-ghost" id="btnHomeCancel">取消</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Modal: device -->
+  <dialog id="dlgDevice" class="modal">
+    <form method="dialog" id="formDevice" class="modal-card">
+      <h3 id="dlgDeviceTitle">新增设备</h3>
+      <label>
+        设备 ID
+        <input type="text" id="deviceId" required placeholder="涂鸦设备 Id" />
+      </label>
+      <label>
+        设备名称
+        <input type="text" id="deviceName" placeholder="手动填写，可在卡片上直接改" />
+      </label>
+      <p class="hint">型号与输出上限将在读取时根据 pid-schema 的 PID 自动匹配。</p>
+      <div class="modal-actions">
+        <button type="submit" class="btn btn-primary" value="ok">保存</button>
+        <button type="button" class="btn btn-ghost" id="btnDeviceCancel">取消</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Modal: meter -->
+  <dialog id="dlgMeter" class="modal">
+    <form method="dialog" id="formMeter" class="modal-card">
+      <h3 id="dlgMeterTitle">添加电表</h3>
+      <p class="hint" id="meterDlgHint">PID 固定为 <code>7sndpedu8g2tkzvi</code>，功率曲线走 Hestia bizlog（dpId 29 / active_power）。</p>
+      <label>
+        是否三方电表
+        <select id="meterThirdParty" required>
+          <option value="0">否 · 涂鸦电表</option>
+          <option value="1">是 · 三方电表（用一体机并网口功率）</option>
+        </select>
+      </label>
+      <label id="meterIdWrap">
+        电表设备 ID
+        <input type="text" id="meterId" placeholder="例如 bffdf44945cf405111lw2k" />
+      </label>
+      <label id="meterDeviceWrap" class="hidden">
+        一体机设备
+        <select id="meterDeviceSelect">
+          <option value="">请选择一体机</option>
+        </select>
+      </label>
+      <label>
+        设备名称
+        <input type="text" id="meterName" placeholder="例如 家庭电表" />
+      </label>
+      <p class="hint" id="meterRegionHint">Hestia 区域随当前家庭环境自动跟随，不可单独选择。</p>
+      <div class="modal-actions">
+        <button type="submit" class="btn btn-primary" value="ok">保存</button>
+        <button type="button" class="btn btn-ghost" id="btnMeterCancel">取消</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Modal: wiring bus manager (connections are drag-on-canvas) -->
+  <dialog id="dlgWiring" class="modal modal-wide">
+    <form method="dialog" id="formWiring" class="modal-card wiring-modal">
+      <h3>管理家庭端子</h3>
+      <p class="hint">在此增删/改名端子。画布上从端子圆点拖到一体机端口即可接线；点选连线后按 Delete 删除。</p>
+
+      <section class="wiring-sec">
+        <div class="wiring-sec-hd">
+          <strong>家庭端子</strong>
+          <div class="wiring-add-row">
+            <select id="wiringNewBusKind">
+              <option value="pv">光伏 PV</option>
+              <option value="grid">电网 Grid</option>
+              <option value="bypass">Bypass负载</option>
+              <option value="family">家庭负载</option>
+            </select>
+            <button type="button" class="btn btn-sm" id="btnWiringAddBus">+ 添加端子</button>
+          </div>
+        </div>
+        <div id="wiringBusList" class="wiring-bus-list"></div>
+      </section>
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="btnWiringReset">恢复默认端子</button>
+        <button type="submit" class="btn btn-primary" value="ok">保存</button>
+        <button type="button" class="btn btn-ghost" id="btnWiringCancel">取消</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Modal: device more points + version -->
+  <dialog id="dlgDevicePoints" class="modal modal-wide">
+    <div class="modal-card wiring-modal">
+      <h3 id="dlgDevicePointsTitle">设备详情</h3>
+      <p class="hint" id="dlgDevicePointsHint"></p>
+      <div class="home-tabs dlg-tabs" id="devicePointsTabs" role="tablist">
+        <button type="button" class="home-tab active" data-points-tab="points" role="tab" aria-selected="true">点位详情</button>
+        <button type="button" class="home-tab" data-points-tab="version" role="tab" aria-selected="false">版本信息</button>
+      </div>
+      <div id="devicePointsPanel" class="home-tab-panel" role="tabpanel">
+        <div class="points-table-wrap">
+          <table class="wiring-table points-table" id="devicePointsTable">
+            <thead>
+              <tr>
+                <th>dpid</th>
+                <th>dpcode</th>
+                <th>物模型 code</th>
+                <th>当前值</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="deviceVersionPanel" class="home-tab-panel hidden" role="tabpanel">
+        <div id="deviceVersionBody" class="version-kv">加载中…</div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-primary" id="btnDevicePointsClose">关闭</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="dlgRegQuery" class="modal modal-wide">
+    <div class="modal-card reg-query-modal">
+      <h3 id="dlgRegQueryTitle">寄存器查询</h3>
+      <p class="hint" id="dlgRegQueryHint"></p>
+      <div class="home-tabs dlg-tabs" id="regQueryTabs" role="tablist">
+        <button type="button" class="home-tab active" data-reg-mode="property" role="tab" aria-selected="true">物模型明文值</button>
+        <button type="button" class="home-tab" data-reg-mode="bizlog" role="tab" aria-selected="false">DP 原始报文</button>
+      </div>
+      <div class="reg-meta" id="regQueryMeta">加载协议信息…</div>
+      <label class="fld reg-addr-fld hidden" id="regQueryDpRow">
+        <span class="reg-dp-lab">查询 DP <a href="#" id="regQueryDpMore" class="reg-dp-more" target="_blank" rel="noopener noreferrer">更多</a></span>
+        <select id="regQueryDpPick">
+          <option value="">切换到「DP 原始报文」后加载</option>
+        </select>
+      </label>
+      <label class="fld reg-addr-fld">
+        <span>寄存器地址</span>
+        <input type="text" id="regQueryAddr" placeholder="如 4026 或 0x4026" autocomplete="off" />
+      </label>
+      <div class="modal-actions" style="justify-content:flex-start;margin-top:10px">
+        <button type="button" class="btn btn-primary" id="btnRegQueryRun">查询</button>
+        <button type="button" class="btn btn-ghost" id="btnRegQueryClose">关闭</button>
+      </div>
+      <div class="reg-query-result" id="regQueryResult" hidden></div>
+    </div>
+  </dialog>
+
+  <dialog id="dlgOwnerStrat" class="modal modal-top">
+    <div class="modal-card">
+      <h3 id="dlgOwnerStratTitle">上报策略判定</h3>
+      <div id="dlgOwnerStratBody" class="owner-strat-body"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-primary" id="btnOwnerStratClose">关闭</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="dlgManualSchedule" class="modal modal-wide">
+    <div class="modal-card wiring-modal manual-schedule-modal">
+      <h3 id="dlgManualScheduleTitle">手动设置 · 时段配置</h3>
+      <p class="hint">手动按星期 / 分时无星期，最多 8 段。拖拽选段后配置参数并下发。</p>
+      <div class="ms-days" id="msDays"></div>
+      <div id="msTimeline" class="ms-timeline-host"></div>
+      <div class="ms-slots" id="msSlots"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-primary" id="btnManualScheduleSave">保存并下发</button>
+        <button type="button" class="btn btn-ghost" id="btnManualScheduleClose">取消</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="dlgSnapshotPreview" class="modal modal-wide">
+    <div class="modal-card snap-preview-modal">
+      <h3>运行快照预览</h3>
+      <p class="hint" id="snapPreviewMeta"></p>
+      <div class="snap-preview-body">
+        <img id="snapPreviewImg" alt="snapshot preview" title="点击放大至全屏，再点或按 Esc 退出" />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="btnSnapPreviewClose">关闭</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="dlgAppConfirm" class="modal">
+    <div class="modal-card">
+      <h3 id="appConfirmTitle">确认</h3>
+      <p class="hint" id="appConfirmMsg" style="white-space:pre-wrap;margin:10px 0 0"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="btnAppConfirmCancel">取消</button>
+        <button type="button" class="btn btn-primary" id="btnAppConfirmOk">确定</button>
+      </div>
+    </div>
+  </dialog>
+
+  <div id="snapFullscreen" class="snap-fs hidden" hidden>
+    <img id="snapFullscreenImg" alt="snapshot fullscreen" />
+    <button type="button" class="snap-fs-close" id="btnSnapFsClose" title="退出全屏">×</button>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/html2canvas.min.js"></script>
+  <!-- 层3 checker 固件运行逻辑（对齐 CBE_RESONATE_MASTER）：先于 flow.js/app.js 加载 -->
+  <script src="/checker/device-model.js?v=20260817-caselib9"></script>
+  <script src="/checker/owner-model.js?v=20260817-caselib9"></script>
+  <script src="/checker/dp98.js?v=20260818-caselib42"></script>
+  <script src="/checker/cluster.js?v=20260817-caselib9"></script>
+  <script src="/flow.js?v=20260818-caselib44"></script>
+  <script src="/app.js?v=20260818-caselib41"></script>
+</body>
+</html>

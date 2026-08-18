@@ -1,0 +1,115 @@
+和本工程无关，现在需要增加一个家庭设备快捷看板页面
+一、组成
+1、选择环境:
+const ENV_CONFIG = {
+  'newenergy-operation-cn.wgine-inc.com': { name: '中国预发', short: 'CN-Pre', region: 'cn', supported: true },
+  'newenergy-operation-cn.tuya-inc.com': { name: '中国线上', short: 'CN-Prod', region: 'cn', supported: true },
+  'newenergy-operation-eu.wgine-inc.com': { name: '欧洲预发', short: 'EU-Pre', region: 'eu', supported: false },
+  'newenergy-operation-eu.tuya-inc.com': { name: '欧洲线上', short: 'EU-Prod', region: 'eu', supported: false },
+  'newenergy-operation-us.wgine-inc.com': { name: '美国预发', short: 'US-Pre', region: 'us', supported: false },
+  'newenergy-operation-us.tuya-inc.com': { name: '美国线上', short: 'US-Prod', region: 'us', supported: false },
+  'newenergy-operation-sg.tuya-inc.com': { name: '新加坡线上', short: 'SG-Prod', region: 'sg', supported: false },
+  'newenergy-operation-weaz.tuya-inc.com': { name: '西欧线上', short: 'WEAZ', region: 'weaz', supported: false },
+  'newenergy-operation-ueaz.tuya-inc.com': { name: '美东线上', short: 'UEAZ', region: 'ueaz', supported: false },
+  '127.0.0.1': { name: '本机', short: 'Local', region: 'local', supported: true },
+  'localhost': { name: '本机', short: 'Local', region: 'local', supported: true },
+}
+然后手动填写拷贝cookie
+2、手动录入家庭id
+3、手动填写设备id
+4、设备卡片下拉选择设备型号：
+CBE2000:输出限制值 2048
+Lyra 1500
+atlas 3000
+5、展示上报dp：
+-发电功率：pv_power_total
+-并网口功率：grid_port_power（dpid 27 / dpcode inverter_output_power；兼容旧 grid_power）
+  - 正数 = 馈网（一体机→电网）
+  - 负数 = 买电（电网→一体机）
+-电池功率：battery_power
+-当前soc：current_soc
+-备电soc：
+-离网口功率：battery_charging_power_grid（dpid 38 / dpcode offgrid1_export_power）
+-法规并网输出限制：regulation_grid_export_p_limit 上限按照选择的设备型号来
+-逆变输入限制：inverter_input_power_limit
+-逆变输出：output_power_limit
+6、每个设备卡片下方展示soc曲线
+
+
+二、接口
+1、https://backendng-cn.tuya-inc.com:7799/operation/device/familySearch  这个页面是 获取家庭下设备信息 
+2、https://hestia-cn.tuya-inc.com:7799/  查询设备日志的
+3、
+curl 'https://newenergy-operation-cn.tuya-inc.com:7799/api/wireman-kong/ems/energy-device/pid-schema?devId=6c54c342f15699c328jqyg' \
+  -H 'accept: application/json, text/plain, */*' \
+  -H 'accept-language: en,zh-CN;q=0.9,zh;q=0.8' \
+  -b 'e255ad9b8262a02d28bca48235a96357=111115510; 7ce0ff06556c05363a176b03dfdd5680=4327; a608ea7c4cbd1919ce039822a2e5d753=04327; cd1f6c4c522c03e21ad83ee2d7b0c515=%E5%8A%AA%E5%8A%AA%EF%BC%88%E6%B4%AA%E4%BD%B3%E4%BC%9F%EF%BC%89; olympos.server.version=0731; sensorsdata2015jssdkcross=%7B%22distinct_id%22%3A%221914a86becd19aa-08e06522c3f35b8-18525637-2073600-1914a86bece2d4f%22%2C%22first_id%22%3A%22%22%2C%22props%22%3A%7B%22%24latest_traffic_source_type%22%3A%22%E7%9B%B4%E6%8E%A5%E6%B5%81%E9%87%8F%22%2C%22%24latest_search_keyword%22%3A%22%E6%9C%AA%E5%8F%96%E5%88%B0%E5%80%BC_%E7%9B%B4%E6%8E%A5%E6%89%93%E5%BC%80%22%2C%22%24latest_referrer%22%3A%22%22%7D%2C%22identities%22%3A%22eyIkaWRlbnRpdHlfY29va2llX2lkIjoiMTkxNGE4NmJlY2QxOWFhLTA4ZTA2NTIyYzNmMzViOC0xODUyNTYzNy0yMDczNjAwLTE5MTRhODZiZWNlMmQ0ZiJ9%22%2C%22history_login_id%22%3A%7B%22name%22%3A%22%22%2C%22value%22%3A%22%22%7D%2C%22%24device_id%22%3A%221914a86becd19aa-08e06522c3f35b8-18525637-2073600-1914a86bece2d4f%22%7D; _tpmGuid=TY-e7f9973cda3aeed3; _tpmSid=1379260363026989056; gTyPlatLang=zh; COOKICE_USER_TOKEN_PC=ss_12mqfnsoaxpOBGmyreof231iuUaVnYdKDhtXHXn6KEekrZ6rPmctPJ7jaqHudh0ze9MDj8xFRAQZd4-RCMWfVyL86MlBGVf-jxjtvGooq_bzJZLOHciXfaOA5dMSUI0RekTJ2lDVJRPsv4NcQ_BG5OJXAT3MTlRbyST2CODP; _tpmSeqId=seq_id_5a04760e8f3cb0bc; SSO_USER_TOKEN=ss_S7n6B_7kKiD4kIY_1ImgSFFFLGExRCp2mwyEXDLITgGwZE8L4J5sP5vjqlf84T0kj2fFDXsHBL7hPkvQFTDZWLDuNIPq48ad0mUUpsNKKmkz0BTbv9ak6ZystJbRyM8qiYm0zV4SNNXi85s_ua4jC0ZGLUsupVdW' \
+  -H 'priority: u=1, i' \
+  -H 'referer: https://newenergy-operation-cn.tuya-inc.com:7799/ems-amis/energydevice/device/property/index.html' \
+  -H 'sec-ch-ua: "Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"' \
+  -H 'sec-ch-ua-mobile: ?0' \
+  -H 'sec-ch-ua-platform: "macOS"' \
+  -H 'sec-fetch-dest: empty' \
+  -H 'sec-fetch-mode: cors' \
+  -H 'sec-fetch-site: same-origin' \
+  -H 'user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
+2、查询数据回显值
+curl 'https://newenergy-operation-cn.tuya-inc.com:7799/api/wireman-kong/ems/energy-device/property/query?page=1&deviceId=6c54c342f15699c328jqyg' \
+  -H 'accept: application/json, text/plain, */*' \
+  -H 'accept-language: en,zh-CN;q=0.9,zh;q=0.8' \
+  -b 'e255ad9b8262a02d28bca48235a96357=111115510; 7ce0ff06556c05363a176b03dfdd5680=4327; a608ea7c4cbd1919ce039822a2e5d753=04327; cd1f6c4c522c03e21ad83ee2d7b0c515=%E5%8A%AA%E5%8A%AA%EF%BC%88%E6%B4%AA%E4%BD%B3%E4%BC%9F%EF%BC%89; olympos.server.version=0731; sensorsdata2015jssdkcross=%7B%22distinct_id%22%3A%221914a86becd19aa-08e06522c3f35b8-18525637-2073600-1914a86bece2d4f%22%2C%22first_id%22%3A%22%22%2C%22props%22%3A%7B%22%24latest_traffic_source_type%22%3A%22%E7%9B%B4%E6%8E%A5%E6%B5%81%E9%87%8F%22%2C%22%24latest_search_keyword%22%3A%22%E6%9C%AA%E5%8F%96%E5%88%B0%E5%80%BC_%E7%9B%B4%E6%8E%A5%E6%89%93%E5%BC%80%22%2C%22%24latest_referrer%22%3A%22%22%7D%2C%22identities%22%3A%22eyIkaWRlbnRpdHlfY29va2llX2lkIjoiMTkxNGE4NmJlY2QxOWFhLTA4ZTA2NTIyYzNmMzViOC0xODUyNTYzNy0yMDczNjAwLTE5MTRhODZiZWNlMmQ0ZiJ9%22%2C%22history_login_id%22%3A%7B%22name%22%3A%22%22%2C%22value%22%3A%22%22%7D%2C%22%24device_id%22%3A%221914a86becd19aa-08e06522c3f35b8-18525637-2073600-1914a86bece2d4f%22%7D; _tpmGuid=TY-e7f9973cda3aeed3; _tpmSid=1379260363026989056; gTyPlatLang=zh; COOKICE_USER_TOKEN_PC=ss_12mqfnsoaxpOBGmyreof231iuUaVnYdKDhtXHXn6KEekrZ6rPmctPJ7jaqHudh0ze9MDj8xFRAQZd4-RCMWfVyL86MlBGVf-jxjtvGooq_bzJZLOHciXfaOA5dMSUI0RekTJ2lDVJRPsv4NcQ_BG5OJXAT3MTlRbyST2CODP; _tpmSeqId=seq_id_5a04760e8f3cb0bc; SSO_USER_TOKEN=ss_S7n6B_7kKiD4kIY_1ImgSFFFLGExRCp2mwyEXDLITgGwZE8L4J5sP5vjqlf84T0kj2fFDXsHBL7hPkvQFTDZWLDuNIPq48ad0mUUpsNKKmkz0BTbv9ak6ZystJbRyM8qiYm0zV4SNNXi85s_ua4jC0ZGLUsupVdW' \
+  -H 'priority: u=1, i' \
+  -H 'referer: https://newenergy-operation-cn.tuya-inc.com:7799/ems-amis/energydevice/device/property/index.html' \
+  -H 'sec-ch-ua: "Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"' \
+  -H 'sec-ch-ua-mobile: ?0' \
+  -H 'sec-ch-ua-platform: "macOS"' \
+  -H 'sec-fetch-dest: empty' \
+  -H 'sec-fetch-mode: cors' \
+  -H 'sec-fetch-site: same-origin' \
+  -H 'user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
+3、下发
+curl 'https://newenergy-operation-cn.tuya-inc.com:7799/api/wireman-kong/ems/energy-device/issue' \
+  -H 'accept: application/json, text/plain, */*' \
+  -H 'accept-language: en,zh-CN;q=0.9,zh;q=0.8' \
+  -H 'content-type: application/json' \
+  -b 'e255ad9b8262a02d28bca48235a96357=111115510; 7ce0ff06556c05363a176b03dfdd5680=4327; a608ea7c4cbd1919ce039822a2e5d753=04327; cd1f6c4c522c03e21ad83ee2d7b0c515=%E5%8A%AA%E5%8A%AA%EF%BC%88%E6%B4%AA%E4%BD%B3%E4%BC%9F%EF%BC%89; olympos.server.version=0731; sensorsdata2015jssdkcross=%7B%22distinct_id%22%3A%221914a86becd19aa-08e06522c3f35b8-18525637-2073600-1914a86bece2d4f%22%2C%22first_id%22%3A%22%22%2C%22props%22%3A%7B%22%24latest_traffic_source_type%22%3A%22%E7%9B%B4%E6%8E%A5%E6%B5%81%E9%87%8F%22%2C%22%24latest_search_keyword%22%3A%22%E6%9C%AA%E5%8F%96%E5%88%B0%E5%80%BC_%E7%9B%B4%E6%8E%A5%E6%89%93%E5%BC%80%22%2C%22%24latest_referrer%22%3A%22%22%7D%2C%22identities%22%3A%22eyIkaWRlbnRpdHlfY29va2llX2lkIjoiMTkxNGE4NmJlY2QxOWFhLTA4ZTA2NTIyYzNmMzViOC0xODUyNTYzNy0yMDczNjAwLTE5MTRhODZiZWNlMmQ0ZiJ9%22%2C%22history_login_id%22%3A%7B%22name%22%3A%22%22%2C%22value%22%3A%22%22%7D%2C%22%24device_id%22%3A%221914a86becd19aa-08e06522c3f35b8-18525637-2073600-1914a86bece2d4f%22%7D; _tpmGuid=TY-e7f9973cda3aeed3; _tpmSid=1379260363026989056; gTyPlatLang=zh; COOKICE_USER_TOKEN_PC=ss_12mqfnsoaxpOBGmyreof231iuUaVnYdKDhtXHXn6KEekrZ6rPmctPJ7jaqHudh0ze9MDj8xFRAQZd4-RCMWfVyL86MlBGVf-jxjtvGooq_bzJZLOHciXfaOA5dMSUI0RekTJ2lDVJRPsv4NcQ_BG5OJXAT3MTlRbyST2CODP; _tpmSeqId=seq_id_5a04760e8f3cb0bc; SSO_USER_TOKEN=ss_S7n6B_7kKiD4kIY_1ImgSFFFLGExRCp2mwyEXDLITgGwZE8L4J5sP5vjqlf84T0kj2fFDXsHBL7hPkvQFTDZWLDuNIPq48ad0mUUpsNKKmkz0BTbv9ak6ZystJbRyM8qiYm0zV4SNNXi85s_ua4jC0ZGLUsupVdW' \
+  -H 'origin: https://newenergy-operation-cn.tuya-inc.com:7799' \
+  -H 'priority: u=1, i' \
+  -H 'referer: https://newenergy-operation-cn.tuya-inc.com:7799/ems-amis/energydevice/device/property/index.html' \
+  -H 'sec-ch-ua: "Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"' \
+  -H 'sec-ch-ua-mobile: ?0' \
+  -H 'sec-ch-ua-platform: "macOS"' \
+  -H 'sec-fetch-dest: empty' \
+  -H 'sec-fetch-mode: cors' \
+  -H 'sec-fetch-site: same-origin' \
+  -H 'user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36' \
+  --data-raw '{"devId":"6c54c342f15699c328jqyg","timestamp":null,"propertyList":[{"dpId":"30","dpValue":22}]}'
+4、方案号协议号
+curl 'https://newenergy-operation-cn.tuya-inc.com:7799/api/wireman-kong/ems/energy-device/protocol/query?deviceId=6c54c342f15699c328jqyg' \
+  -H 'accept: application/json, text/plain, */*' \
+  -H 'accept-language: en,zh-CN;q=0.9,zh;q=0.8' \
+  -b 'e255ad9b8262a02d28bca48235a96357=111115510; 7ce0ff06556c05363a176b03dfdd5680=4327; a608ea7c4cbd1919ce039822a2e5d753=04327; cd1f6c4c522c03e21ad83ee2d7b0c515=%E5%8A%AA%E5%8A%AA%EF%BC%88%E6%B4%AA%E4%BD%B3%E4%BC%9F%EF%BC%89; olympos.server.version=0731; sensorsdata2015jssdkcross=%7B%22distinct_id%22%3A%221914a86becd19aa-08e06522c3f35b8-18525637-2073600-1914a86bece2d4f%22%2C%22first_id%22%3A%22%22%2C%22props%22%3A%7B%22%24latest_traffic_source_type%22%3A%22%E7%9B%B4%E6%8E%A5%E6%B5%81%E9%87%8F%22%2C%22%24latest_search_keyword%22%3A%22%E6%9C%AA%E5%8F%96%E5%88%B0%E5%80%BC_%E7%9B%B4%E6%8E%A5%E6%89%93%E5%BC%80%22%2C%22%24latest_referrer%22%3A%22%22%7D%2C%22identities%22%3A%22eyIkaWRlbnRpdHlfY29va2llX2lkIjoiMTkxNGE4NmJlY2QxOWFhLTA4ZTA2NTIyYzNmMzViOC0xODUyNTYzNy0yMDczNjAwLTE5MTRhODZiZWNlMmQ0ZiJ9%22%2C%22history_login_id%22%3A%7B%22name%22%3A%22%22%2C%22value%22%3A%22%22%7D%2C%22%24device_id%22%3A%221914a86becd19aa-08e06522c3f35b8-18525637-2073600-1914a86bece2d4f%22%7D; _tpmGuid=TY-e7f9973cda3aeed3; _tpmSid=1379260363026989056; gTyPlatLang=zh; COOKICE_USER_TOKEN_PC=ss_12mqfnsoaxpOBGmyreof231iuUaVnYdKDhtXHXn6KEekrZ6rPmctPJ7jaqHudh0ze9MDj8xFRAQZd4-RCMWfVyL86MlBGVf-jxjtvGooq_bzJZLOHciXfaOA5dMSUI0RekTJ2lDVJRPsv4NcQ_BG5OJXAT3MTlRbyST2CODP; _tpmSeqId=seq_id_5a04760e8f3cb0bc; SSO_USER_TOKEN=ss_S7n6B_7kKiD4kIY_1ImgSFFFLGExRCp2mwyEXDLITgGwZE8L4J5sP5vjqlf84T0kj2fFDXsHBL7hPkvQFTDZWLDuNIPq48ad0mUUpsNKKmkz0BTbv9ak6ZystJbRyM8qiYm0zV4SNNXi85s_ua4jC0ZGLUsupVdW' \
+  -H 'priority: u=1, i' \
+  -H 'referer: https://newenergy-operation-cn.tuya-inc.com:7799/ems-amis/energydevice/device/property/index.html' \
+  -H 'sec-ch-ua: "Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"' \
+  -H 'sec-ch-ua-mobile: ?0' \
+  -H 'sec-ch-ua-platform: "macOS"' \
+  -H 'sec-fetch-dest: empty' \
+  -H 'sec-fetch-mode: cors' \
+  -H 'sec-fetch-site: same-origin' \
+  -H 'user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
+5、soc历史曲线接口
+curl 'https://newenergy-operation-cn.tuya-inc.com:7799/api/wireman-kong/ems/energy-device/query-neko?energyDeviceId=6c54c342f15699c328jqyg&code=heap_soc&startTime=1785859200&endTime=1785945600&pageSize=1000' \
+  -H 'accept: application/json, text/plain, */*' \
+  -H 'accept-language: en,zh-CN;q=0.9,zh;q=0.8' \
+  -b 'e255ad9b8262a02d28bca48235a96357=111115510; 7ce0ff06556c05363a176b03dfdd5680=4327; a608ea7c4cbd1919ce039822a2e5d753=04327; cd1f6c4c522c03e21ad83ee2d7b0c515=%E5%8A%AA%E5%8A%AA%EF%BC%88%E6%B4%AA%E4%BD%B3%E4%BC%9F%EF%BC%89; olympos.server.version=0731; sensorsdata2015jssdkcross=%7B%22distinct_id%22%3A%221914a86becd19aa-08e06522c3f35b8-18525637-2073600-1914a86bece2d4f%22%2C%22first_id%22%3A%22%22%2C%22props%22%3A%7B%22%24latest_traffic_source_type%22%3A%22%E7%9B%B4%E6%8E%A5%E6%B5%81%E9%87%8F%22%2C%22%24latest_search_keyword%22%3A%22%E6%9C%AA%E5%8F%96%E5%88%B0%E5%80%BC_%E7%9B%B4%E6%8E%A5%E6%89%93%E5%BC%80%22%2C%22%24latest_referrer%22%3A%22%22%7D%2C%22identities%22%3A%22eyIkaWRlbnRpdHlfY29va2llX2lkIjoiMTkxNGE4NmJlY2QxOWFhLTA4ZTA2NTIyYzNmMzViOC0xODUyNTYzNy0yMDczNjAwLTE5MTRhODZiZWNlMmQ0ZiJ9%22%2C%22history_login_id%22%3A%7B%22name%22%3A%22%22%2C%22value%22%3A%22%22%7D%2C%22%24device_id%22%3A%221914a86becd19aa-08e06522c3f35b8-18525637-2073600-1914a86bece2d4f%22%7D; _tpmGuid=TY-e7f9973cda3aeed3; _tpmSid=1379260363026989056; gTyPlatLang=zh; COOKICE_USER_TOKEN_PC=ss_12mqfnsoaxpOBGmyreof231iuUaVnYdKDhtXHXn6KEekrZ6rPmctPJ7jaqHudh0ze9MDj8xFRAQZd4-RCMWfVyL86MlBGVf-jxjtvGooq_bzJZLOHciXfaOA5dMSUI0RekTJ2lDVJRPsv4NcQ_BG5OJXAT3MTlRbyST2CODP; _tpmSeqId=seq_id_5a04760e8f3cb0bc; SSO_USER_TOKEN=ss_0O738pAGsVsMboPPNKhVyARU9BpoFGKidPVkhcdXWI2I5kva9gInawclasDUxByj6kt5sSeq4ePY8GsIox3l7kaHJo1OUosNRHviZUNkYmhhgBJLvoXT55u5pETPcFHIS3rFgDgctUcbY9mNAhDYkAu2ksLD84_t' \
+  -H 'priority: u=1, i' \
+  -H 'referer: https://newenergy-operation-cn.tuya-inc.com:7799/ems-amis/energydevice/device/property/index.html' \
+  -H 'sec-ch-ua: "Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"' \
+  -H 'sec-ch-ua-mobile: ?0' \
+  -H 'sec-ch-ua-platform: "macOS"' \
+  -H 'sec-fetch-dest: empty' \
+  -H 'sec-fetch-mode: cors' \
+  -H 'sec-fetch-site: same-origin' \
+  -H 'user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
+

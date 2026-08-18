@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>caseLib · 型号表</title>
+<style>
+  :root {
+    --bg0: #eef2f7;
+    --bg1: #f7f8fb;
+    --panel: #ffffff;
+    --line: #e6ebf2;
+    --line-strong: #d7dee8;
+    --text: #0f172a;
+    --muted: #64748b;
+    --accent: #111827;
+    --ok: #059669;
+    --danger: #dc2626;
+    --indigo: #4f46e5;
+    --indigo-soft: #eef2ff;
+    --head: #f4f7fb;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    color: var(--text);
+    background:
+      radial-gradient(900px 420px at 8% -10%, #dbeafe 0%, transparent 55%),
+      radial-gradient(700px 380px at 100% 0%, #e0e7ff 0%, transparent 50%),
+      linear-gradient(180deg, var(--bg1), var(--bg0));
+    display: flex; flex-direction: column; min-height: 100vh;
+  }
+  .top {
+    flex: 0 0 auto;
+    display: flex; justify-content: space-between; gap: 16px; align-items: center;
+    padding: 12px 22px;
+    background: rgba(255,255,255,.82);
+    border-bottom: 1px solid var(--line);
+    backdrop-filter: blur(10px);
+  }
+  .top h1 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -0.02em; }
+  .crumb { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .crumb a { color: var(--indigo); text-decoration: none; font-weight: 600; }
+  .crumb a:hover { text-decoration: underline; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button {
+    border: 1px solid var(--line-strong); background: #fff; border-radius: 8px;
+    padding: 7px 12px; font-size: 12px; cursor: pointer; color: var(--text);
+    transition: background .15s, border-color .15s, transform .1s;
+  }
+  button:hover { background: #f8fafc; }
+  button:active { transform: translateY(1px); }
+  button.primary {
+    background: var(--accent); color: #fff; border-color: transparent; font-weight: 650;
+    box-shadow: 0 6px 16px rgba(15, 23, 42, .18);
+  }
+  button.primary:hover { background: #000; }
+  button.ghost { background: transparent; }
+  .pill {
+    display: inline-block; font-size: 10px; font-weight: 700; padding: 2px 8px;
+    border-radius: 999px; background: #ecfdf5; color: var(--ok); margin-left: 6px; vertical-align: 1px;
+  }
+  .pill.off { background: #f1f5f9; color: var(--muted); }
+  .status { font-size: 12px; color: var(--muted); max-width: 420px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--danger); }
+  .main {
+    flex: 1 1 auto; min-height: 0; padding: 22px 22px 28px; overflow: auto;
+  }
+  .panel {
+    max-width: none; margin: 0;
+    background: var(--panel);
+    border: 1px solid rgba(226,232,240,.95);
+    border-radius: 16px;
+    padding: 18px 18px 14px;
+    overflow: auto;
+    box-shadow:
+      0 1px 0 rgba(255,255,255,.8) inset,
+      0 18px 40px rgba(15, 23, 42, .06);
+  }
+  .hint {
+    font-size: 12px; color: var(--muted); margin: 0 0 14px; text-align: center; line-height: 1.5;
+  }
+  .model-table {
+    width: 100%; border-collapse: separate; border-spacing: 0;
+    font-size: 13px; min-width: 900px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .model-table th, .model-table td {
+    border-bottom: 1px solid var(--line);
+    border-right: 1px solid var(--line);
+    padding: 12px 10px;
+    text-align: center;
+    vertical-align: middle;
+  }
+  .model-table th:last-child,
+  .model-table td:last-child { border-right: none; }
+  .model-table tbody tr:last-child td { border-bottom: none; }
+  .model-table th {
+    background: linear-gradient(180deg, #f8fafc, var(--head));
+    color: #475569;
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+  .model-table tbody tr {
+    background: #fff;
+    transition: background .12s;
+  }
+  .model-table tbody tr:nth-child(even) { background: #fbfcfe; }
+  .model-table tbody tr:hover { background: #f5f8ff; }
+  .model-table tr.active { background: #eef4ff !important; }
+  .model-table td.model-name {
+    font-weight: 700;
+    white-space: nowrap;
+    min-width: 150px;
+    color: #0f172a;
+  }
+  .model-table input[type="number"],
+  .model-table input[type="text"] {
+    width: 100%; min-width: 0;
+    border: 1px solid transparent;
+    background: transparent;
+    padding: 6px 8px;
+    border-radius: 8px;
+    font-size: 13px;
+    text-align: center;
+    color: var(--text);
+  }
+  .model-table input:hover {
+    background: rgba(255,255,255,.9);
+    border-color: #e2e8f0;
+  }
+  .model-table input:focus {
+    border-color: #93c5fd;
+    background: #fff;
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(59,130,246,.12);
+  }
+  .model-table .num {
+    width: 68px;
+    margin: 0 auto;
+    display: block;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+  .model-table td.pid-cell { min-width: 280px; }
+  .pid-box {
+    display: flex; flex-direction: column; gap: 8px; align-items: center;
+  }
+  .pid-chips {
+    display: flex; flex-wrap: wrap; gap: 6px; min-height: 26px;
+    align-items: center; justify-content: center;
+  }
+  .pid-chip {
+    display: inline-flex; align-items: center; gap: 2px;
+    max-width: 100%; padding: 3px 4px 3px 10px; border-radius: 999px;
+    background: var(--indigo-soft);
+    border: 1px solid #c7d2fe;
+    font-size: 12px;
+    box-shadow: 0 1px 2px rgba(79, 70, 229, .08);
+  }
+  .pid-chip a {
+    color: var(--indigo); text-decoration: none; font-weight: 700;
+    max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .pid-chip a:hover { text-decoration: underline; }
+  .pid-chip .rm {
+    border: none; background: transparent; color: #94a3b8; padding: 0 6px;
+    cursor: pointer; font-size: 13px; line-height: 1; border-radius: 999px;
+  }
+  .pid-chip .rm:hover { color: var(--danger); background: #fee2e2; }
+  .pid-empty {
+    font-size: 12px; color: #94a3b8;
+    padding: 3px 10px; border-radius: 999px; background: #f8fafc; border: 1px dashed #e2e8f0;
+  }
+  .pid-add-row {
+    display: flex; gap: 6px; align-items: center; justify-content: center; width: 100%;
+  }
+  .pid-add-row input {
+    flex: 1; max-width: 180px;
+    border: 1px solid var(--line) !important;
+    background: #fff !important;
+    min-width: 110px;
+    text-align: center !important;
+  }
+  .pid-add-row button {
+    padding: 5px 10px; font-size: 11px; border-radius: 8px; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>caseLib · 型号表 <span class="pill off" id="svc">…</span></h1>
+      <div class="crumb"><a href="/#live">← 返回 caseLib</a></div>
+    </div>
+    <div class="actions">
+      <div class="status" id="status"></div>
+      <button type="button" class="ghost" id="btnReload">重新加载</button>
+      <button type="button" class="primary" id="btnSave">保存表格</button>
+    </div>
+  </header>
+  <main class="main">
+    <div class="panel">
+      <p class="hint">关联 PID 以芯片占位展示，点击跳转北斗产品详情；可扩展填 0/1。</p>
+      <table class="model-table" id="modelTable">
+        <thead>
+          <tr>
+            <th>型号</th>
+            <th>PV路数</th>
+            <th>Grid口</th>
+            <th>离网口</th>
+            <th>电池容量(kWh)</th>
+            <th>电池可扩展</th>
+            <th title="AC 口最大输入功率(买电/给电池充)限值">AC输入功率限制(W)</th>
+            <th title="AC 口最大输出功率限值">AC输出限制(W)</th>
+            <th title="并网法规允许的最大馈网输出功率">法规输出上限(W)</th>
+            <th title="电池 DC 侧最大充电功率(固件硬顶)">电池DC充电限制(W)</th>
+            <th title="电池 DC 侧最大放电功率(固件硬顶)">电池DC放电限制(W)</th>
+            <th>关联PID</th>
+          </tr>
+        </thead>
+        <tbody id="modelTableBody"></tbody>
+      </table>
+    </div>
+  </main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+  const highlightId = params.get("model") || "";
+  const BEIDOU_PID_URL = "https://iot.tuya-inc.com:7799/beidou/product/detail";
+
+  function setStatus(msg, kind) {
+    const el = $("status");
+    el.textContent = msg || "";
+    el.className = "status" + (kind ? " " + kind : "");
+  }
+
+  async function api(path, opts) {
+    let res;
+    try {
+      res = await fetch(path, opts);
+    } catch (_) {
+      throw new Error("服务已断开，请在终端重新运行：python3 -m caseLib");
+    }
+    let data;
+    try {
+      data = await res.json();
+    } catch (_) {
+      throw new Error(res.ok ? "响应不是 JSON" : (`HTTP ${res.status}`));
+    }
+    if (!res.ok || data.ok === false) throw new Error(data.error || res.statusText || `HTTP ${res.status}`);
+    return data;
+  }
+
+  function esc(s) {
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
+  }
+
+  function normalizePids(raw) {
+    if (Array.isArray(raw)) {
+      return raw.map((x) => String(x || "").trim()).filter(Boolean);
+    }
+    return String(raw || "")
+      .split(/[\/,，、\s]+/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+  }
+
+  function pidHref(pid) {
+    return `${BEIDOU_PID_URL}?id=${encodeURIComponent(pid)}&tab=function`;
+  }
+
+  function renderPidCell(pids) {
+    const list = normalizePids(pids);
+    const chips = list.length
+      ? list.map((pid) =>
+          `<span class="pid-chip" data-pid="${esc(pid)}">
+            <a href="${esc(pidHref(pid))}" target="_blank" rel="noopener noreferrer" title="打开北斗产品详情">${esc(pid)}</a>
+            <button type="button" class="rm" data-rm-pid="${esc(pid)}" title="移除">×</button>
+          </span>`
+        ).join("")
+      : `<span class="pid-empty">暂无 PID</span>`;
+    return `<div class="pid-box" data-k="pids" data-pids="${esc(list.join("/"))}">
+      <div class="pid-chips">${chips}</div>
+      <div class="pid-add-row">
+        <input type="text" class="pid-input" placeholder="输入 PID 回车添加" />
+        <button type="button" class="ghost pid-add-btn">添加</button>
+      </div>
+    </div>`;
+  }
+
+  function syncPidBox(box) {
+    const pids = [...box.querySelectorAll(".pid-chip[data-pid]")].map((el) => el.getAttribute("data-pid"));
+    box.setAttribute("data-pids", pids.join("/"));
+    const chips = box.querySelector(".pid-chips");
+    if (!pids.length) {
+      chips.innerHTML = `<span class="pid-empty">暂无 PID</span>`;
+    }
+  }
+
+  function addPidToBox(box, pidRaw) {
+    const pid = String(pidRaw || "").trim();
+    if (!pid) return;
+    const chips = box.querySelector(".pid-chips");
+    const exist = [...chips.querySelectorAll(".pid-chip[data-pid]")].map((el) => el.getAttribute("data-pid"));
+    if (exist.includes(pid)) return;
+    chips.querySelector(".pid-empty")?.remove();
+    const span = document.createElement("span");
+    span.className = "pid-chip";
+    span.setAttribute("data-pid", pid);
+    span.innerHTML =
+      `<a href="${esc(pidHref(pid))}" target="_blank" rel="noopener noreferrer" title="打开北斗产品详情">${esc(pid)}</a>` +
+      `<button type="button" class="rm" data-rm-pid="${esc(pid)}" title="移除">×</button>`;
+    chips.appendChild(span);
+    syncPidBox(box);
+  }
+
+  function bindPidCellEvents(root) {
+    root.querySelectorAll(".pid-box").forEach((box) => {
+      const input = box.querySelector(".pid-input");
+      const addBtn = box.querySelector(".pid-add-btn");
+      const add = () => {
+        addPidToBox(box, input.value);
+        input.value = "";
+        input.focus();
+      };
+      addBtn.addEventListener("click", add);
+      input.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          add();
+        }
+      });
+      box.addEventListener("click", (ev) => {
+        const btn = ev.target.closest("[data-rm-pid]");
+        if (!btn) return;
+        ev.preventDefault();
+        const chip = btn.closest(".pid-chip");
+        if (chip) chip.remove();
+        syncPidBox(box);
+      });
+    });
+  }
+
+  function renderTable(models) {
+    const body = $("modelTableBody");
+    body.innerHTML = (models || []).map((m) => {
+      const active = highlightId && m.id === highlightId ? " active" : "";
+      return `<tr class="${active}" data-model-id="${esc(m.id)}">
+        <td class="model-name">${esc(m.name || m.id)}</td>
+        <td><input class="num" type="number" min="0" step="1" data-k="pv_n" value="${Number(m.pv_n) || 0}" /></td>
+        <td><input class="num" type="number" min="0" step="1" data-k="grid_n" value="${Number(m.grid_n) || 0}" /></td>
+        <td><input class="num" type="number" min="0" step="1" data-k="offgrid_n" value="${Number(m.offgrid_n) || 0}" /></td>
+        <td><input class="num" type="number" min="0" step="0.001" data-k="battery_kwh" value="${Number(m.battery_kwh) || 0}" /></td>
+        <td><input class="num" type="number" min="0" max="1" step="1" data-k="battery_expand" value="${Number(m.battery_expand) ? 1 : 0}" /></td>
+        <td><input class="num" type="number" min="0" step="10" data-k="ac_in_limit_w" value="${Number(m.ac_in_limit_w) || 0}" /></td>
+        <td><input class="num" type="number" min="0" step="10" data-k="ac_out_limit_w" value="${Number(m.ac_out_limit_w) || 0}" /></td>
+        <td><input class="num" type="number" min="0" step="10" data-k="reg_out_limit_w" value="${Number(m.reg_out_limit_w) || 0}" /></td>
+        <td><input class="num" type="number" min="0" step="10" data-k="bat_dc_chg_w" value="${Number(m.bat_dc_chg_w) || 0}" /></td>
+        <td><input class="num" type="number" min="0" step="10" data-k="bat_dc_dchg_w" value="${Number(m.bat_dc_dchg_w) || 0}" /></td>
+        <td class="pid-cell">${renderPidCell(m.pids)}</td>
+      </tr>`;
+    }).join("");
+    bindPidCellEvents(body);
+  }
+
+  function readTable() {
+    const rows = [];
+    $("modelTableBody").querySelectorAll("tr[data-model-id]").forEach((tr) => {
+      const id = tr.getAttribute("data-model-id");
+      const get = (k) => {
+        const el = tr.querySelector(`[data-k="${k}"]`);
+        if (!el) return "";
+        if (el.hasAttribute("data-pids")) return el.getAttribute("data-pids") || "";
+        return el.value || "";
+      };
+      rows.push({
+        id,
+        name: id,
+        pv_n: Number(get("pv_n") || 0),
+        grid_n: Number(get("grid_n") || 0),
+        offgrid_n: Number(get("offgrid_n") || 0),
+        battery_kwh: Number(get("battery_kwh") || 0),
+        battery_expand: Number(get("battery_expand") || 0) ? 1 : 0,
+        ac_in_limit_w: Number(get("ac_in_limit_w") || 0),
+        ac_out_limit_w: Number(get("ac_out_limit_w") || 0),
+        reg_out_limit_w: Number(get("reg_out_limit_w") || 0),
+        bat_dc_chg_w: Number(get("bat_dc_chg_w") || 0),
+        bat_dc_dchg_w: Number(get("bat_dc_dchg_w") || 0),
+        pids: String(get("pids") || ""),
+      });
+    });
+    return rows;
+  }
+
+  async function load() {
+    const data = await api("/api/models");
+    renderTable(data.models || []);
+    setStatus(`已加载 ${(data.models || []).length} 个型号`, "ok");
+  }
+
+  async function save() {
+    try {
+      const models = readTable();
+      const data = await api("/api/models/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ models }),
+      });
+      renderTable(data.models || models);
+      setStatus(`已保存 · ${(data.models || models).length} 行`, "ok");
+    } catch (e) {
+      setStatus(String(e.message || e), "err");
+    }
+  }
+
+  $("btnSave").addEventListener("click", () => save());
+  $("btnReload").addEventListener("click", () => load().catch((e) => setStatus(String(e.message || e), "err")));
+
+  (async () => {
+    try {
+      await api("/api/health");
+      $("svc").textContent = "就绪";
+      $("svc").className = "pill";
+      await load();
+    } catch (e) {
+      $("svc").textContent = "离线";
+      $("svc").className = "pill off";
+      setStatus(String(e.message || e), "err");
+    }
+  })();
+})();
+</script>
+</body>
+</html>
