@@ -1,8 +1,6 @@
 /* ===================================================================
- * checker / 固件运行逻辑层 — 对齐 MCU 源码 CBE_RESONATE_MASTER。
+ * checker / 固件运行逻辑层 — 对齐 groupAppControl/static/app.js classifyOwnerWorkModel。
  * MCU 固件改动只需同步本目录。全局作用域(经典 <script>)，无 import/export。
- * 本文件由 app.js 原样迁出，逻辑一字未改。
- * 来源 app.js L372-664 ↔ 固件 owner_infomation_package (app_wifi.c)
  * =================================================================== */
 
 /**
@@ -34,6 +32,22 @@ function _ownerNum(v, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** 功率限制 DP：0 是有效值，不能用 `|| fallback` 吞掉。多个 DP 取更小值。 */
+function _ownerPickLim(v, keys, fallback) {
+  let found = null;
+  for (const k of keys) {
+    if (v[k] == null || v[k] === "") {
+      continue;
+    }
+    const n = Number(v[k]);
+    if (!Number.isFinite(n)) {
+      continue;
+    }
+    found = found == null ? n : Math.min(found, n);
+  }
+  return found == null ? fallback : found;
+}
+
 function _ownerFault(raw) {
   if (raw == null || raw === "" || raw === 0 || raw === "0") return false;
   if (typeof raw === "boolean") return raw;
@@ -43,6 +57,75 @@ function _ownerFault(raw) {
   const s = String(raw);
   if (!s || s === "0" || s === "[]" || s === "{}") return false;
   return /inverter_failure|grid_failure|inverter_output_fault|inverter_other_fault|system_/.test(s) || s !== "0";
+}
+
+/** DP20 `pv_power_total` only. */
+function _ownerPvW(device) {
+  const v = device?.values || {};
+  return Math.max(0, _ownerNum(v.pv_power_total, 0));
+}
+
+/** DP38 `offgrid1_export_power`（影子可能记在 battery_charging_power_grid）。 */
+function _ownerBypassW(device) {
+  const v = device?.values || {};
+  return _ownerNum(v.offgrid1_export_power ?? v.battery_charging_power_grid, 0);
+}
+
+/** app_inverter.c stChgMap：[socL, socH, tL°C, tH°C, curr]。SoC∈[L,H]，温∈(tL,tH]。 */
+const OWNER_CHG_MAP = [
+  [0, 100, -50, 0, 0],
+  [0, 65, 0, 5, 25], [66, 75, 0, 5, 15], [76, 85, 0, 5, 10], [86, 95, 0, 5, 8], [96, 100, 0, 5, 4],
+  [0, 45, 5, 10, 40], [46, 75, 5, 10, 25], [76, 85, 5, 10, 15], [86, 95, 5, 10, 10], [96, 100, 5, 10, 8],
+  [0, 70, 10, 15, 50], [71, 80, 10, 15, 40], [81, 95, 10, 15, 25], [96, 98, 10, 15, 10], [99, 100, 10, 15, 8],
+  [0, 90, 15, 20, 50], [91, 95, 15, 20, 40], [96, 98, 15, 20, 25], [99, 100, 15, 20, 10],
+  [0, 90, 20, 45, 50], [91, 95, 20, 45, 40], [96, 98, 20, 45, 30], [99, 100, 20, 45, 20],
+  [0, 80, 45, 50, 40], [81, 90, 45, 50, 25], [91, 95, 45, 50, 15], [96, 100, 45, 50, 10],
+  [0, 50, 50, 55, 30], [51, 80, 50, 55, 25], [81, 95, 50, 55, 15], [96, 100, 50, 55, 10],
+  [0, 50, 55, 60, 30], [51, 80, 55, 60, 25], [81, 90, 55, 60, 15], [91, 100, 55, 60, 10],
+  [0, 100, 60, 65, 0],
+];
+const OWNER_BAT_CHG_CAP_W = 3000;
+const OWNER_CHG_DEFAULT_TEMP_C = 25;
+
+function _ownerPickTempC(v, keys) {
+  for (const k of keys) {
+    if (v[k] != null && v[k] !== "") {
+      const n = Number(v[k]);
+      if (Number.isFinite(n)) return n;
+    }
+  }
+  return null;
+}
+
+function _ownerCellTempC(device) {
+  const v = device?.values || {};
+  const tMin = _ownerPickTempC(v, ["min_cell_temp", "cell_temp_min", "pack_temp_min", "battery_min_temp"]);
+  const tMax = _ownerPickTempC(v, ["max_cell_temp", "cell_temp_max", "pack_temp_max", "battery_max_temp"]);
+  const tOne = _ownerPickTempC(v, ["battery_temp", "bms_temp", "pack_temp", "cell_temp"]);
+  const assumed = tMin == null && tMax == null && tOne == null;
+  return {
+    minC: tMin != null ? tMin : tOne != null ? tOne : OWNER_CHG_DEFAULT_TEMP_C,
+    maxC: tMax != null ? tMax : tOne != null ? tOne : OWNER_CHG_DEFAULT_TEMP_C,
+    assumed,
+  };
+}
+
+/** chgCurr_refer_function：SoC≥100 或 T<0 或 T>60 → 0。 */
+function _ownerChgCurr(soc, tempC) {
+  if (soc >= 100 || tempC < 0 || tempC > 60) return 0;
+  for (let i = 0; i < OWNER_CHG_MAP.length; i++) {
+    const row = OWNER_CHG_MAP[i];
+    if (soc >= row[0] && soc <= row[1] && tempC > row[2] && tempC <= row[3]) return row[4];
+  }
+  return 0;
+}
+
+/** (Chuneng_chg_map()*1080*6)/100，再与 3000 取小。 */
+function _ownerMapChgW(soc, device) {
+  const temps = _ownerCellTempC(device);
+  const curr = Math.min(_ownerChgCurr(soc, temps.minC), _ownerChgCurr(soc, temps.maxC));
+  const mapW = Math.floor((curr * 1080 * 6) / 100);
+  return { mapW, capW: Math.min(OWNER_BAT_CHG_CAP_W, mapW), curr, temps };
 }
 
 /**
@@ -64,22 +147,41 @@ function classifyOwnerWorkModel(device) {
 
   const modelMetaObj = typeof modelMeta === "function" ? modelMeta(device) : null;
   const invCap = modelMetaObj?.maxExport || 1500;
-  const bypassCap = invCap >= 2500 ? 3000 : 1500; // Lyra 1500 / CBE·Atlas 3000
+  const bypassCap = modelMetaObj?.bypassCap || (invCap >= 2500 ? 3000 : 1500);
+  const modelBatChgCap = modelMetaObj?.batDcChgW || invCap;
+  const modelBatDchgCap = modelMetaObj?.batDcDchgW || invCap;
 
   const soc = _ownerNum(v.current_soc ?? v.main_soc, NaN);
   const back = _ownerNum(v.backup_soc ?? v.backup_reserve, 20);
-  const pv = Math.max(0, _ownerNum(v.pv_power_total, 0));
-  const bypass = _ownerNum(v.offgrid1_export_power ?? v.battery_charging_power_grid, 0);
-  const batChg = _ownerNum(v.bat_max_chg_w ?? v.battery_max_charge_power, invCap);
-  const batDchg = _ownerNum(v.bat_max_dchg_w ?? v.battery_max_discharge_power, invCap);
-  const outLim = _ownerNum(v.output_power_limit || v.regulation_grid_export_p_limit, invCap) || invCap;
-  const gridLim = _ownerNum(v.inverter_input_power_limit, invCap) || invCap;
+  const pv = _ownerPvW(device);
+  const bypass = _ownerBypassW(device);
+  const mapped = Number.isNaN(soc) ? { capW: 0, mapW: 0, curr: 0, temps: { minC: 25, maxC: 25, assumed: true } } : _ownerMapChgW(soc, device);
+  let batChg = Math.min(mapped.capW, modelBatChgCap);
+  const dpChg = _ownerPickLim(v, ["bat_max_chg_w", "battery_max_charge_power"], null);
+  if (dpChg != null) {
+    batChg = Math.min(batChg, Math.max(0, dpChg));
+  }
+  const batDchg = _ownerPickLim(v, ["bat_max_dchg_w", "battery_max_discharge_power"], modelBatDchgCap);
+  const outLim = _ownerPickLim(v, ["output_power_limit", "regulation_grid_export_p_limit"], invCap);
+  const gridLim = _ownerPickLim(v, ["inverter_input_power_limit"], invCap);
   const invLim = invCap;
   const pvVolt = _ownerNum(v.pv_volt_max ?? v.pv1_voltage, 0);
   const invFault = _ownerFault(v.fault) || _ownerFault(v.error_code);
 
-  if (!device._ownerHyst) device._ownerHyst = { forceChg: false, forceChg1: false, forceChg2: false };
+  if (!device._ownerHyst) {
+    // 刷新后 MCU 的 ubfullchgflag 还在；96–99% 按已满电处理，同会话从低 SoC 爬升则保持 false
+    device._ownerHyst = {
+      forceChg: false,
+      forceChg1: false,
+      forceChg2: false,
+      fullChg: !Number.isNaN(soc) && soc > 95,
+    };
+  }
   const st = device._ownerHyst;
+  // app_inverter.c：SoC==100 → uwbatChgpower=0，回落到 95% 才恢复
+  if (soc >= 100) st.fullChg = true;
+  else if (soc <= 95) st.fullChg = false;
+  if (st.fullChg) batChg = 0;
 
   const inputs = {
     soc,
@@ -94,6 +196,11 @@ function classifyOwnerWorkModel(device) {
     bypassCap,
     pvVolt,
     invFault,
+    fullChg: !!st.fullChg,
+    chgMapCurr: mapped.curr,
+    chgMapTempC: mapped.temps.assumed ? `${mapped.temps.minC}(默认)` : `${mapped.temps.minC}/${mapped.temps.maxC}`,
+    modelBatChgCap,
+    modelBatDchgCap,
   };
 
   const clamp = (chg, dchg) => {
@@ -118,13 +225,13 @@ function classifyOwnerWorkModel(device) {
 
   if (Number.isNaN(soc)) return null;
 
-  if (invFault || (batChg === 0 && batDchg === 0)) {
+  if (invFault || (batChg === 0 && batDchg === 0) || (gridLim === 0 && outLim === 0)) {
     return ret(
       OWNER_WORK_MODEL.DISABLED,
       0,
       0,
-      "故障或电池充放限均为 0",
-      `条件：故障码 ≠ 0  或  (电池最大充=${batChg} 且 最大放=${batDchg})\n` +
+      "故障或充放限均为 0",
+      `条件：故障码 ≠ 0  或  (电池最大充=${batChg} 且 最大放=${batDchg})  或  (并网充限=${gridLim} 且 并网放限=${outLim})\n` +
         `故障判定=${invFault}\n→ 禁充禁放，上报可充=0 / 可放=0`
     );
   }

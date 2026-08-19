@@ -48,13 +48,13 @@ from caseLib.domain.wiring import (
 )
 
 # 层2/4 实时运行+自动测试后端（代理/SSO/store/reports/election）——合并单服务后作为基类复用
-from caseLib.live.server import AppHandler as LiveHandler
+from caseLib.live.server import AppHandler as LiveHandler, _lan_ips
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "web"  # 层0 前端：配置SPA(index)+实时SPA(live.html)+models/scene+js/css
 KNOWLEDGE_DIR = ROOT / "knowledge"  # 层1 离线知识：kg_* + 型号规格 models.json
 RESULTS_DATA_DIR = ROOT / "results" / "data"  # 层4 运行持久化：lab_*/scene_templates
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8780
 
 
@@ -546,6 +546,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     # 单服务单端口：实时运行/自动测试已并入本进程（LiveHandler 基类），不再拉起 5179 子进程
     httpd = ThreadingHTTPServer((host, port), Handler)
     print(f"caseLib（单服务）→ http://{host}:{port}/  · 实时运行 → /live.html")
+    print(f"  本机:   http://127.0.0.1:{port}/")
+    if host in ("0.0.0.0", "::"):
+        lan = _lan_ips()
+        if lan:
+            for ip in lan:
+                print(f"  局域网: http://{ip}:{port}/")
+        else:
+            print("  局域网: 未探测到网卡 IP，请用 ifconfig / ipconfig 查看")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

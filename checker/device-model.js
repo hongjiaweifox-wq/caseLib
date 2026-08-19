@@ -12,13 +12,28 @@ const DEVICE_MODELS = [
     label: "CBE2000",
     badge: "CBE2000",
     maxExport: 2048,
+    bypassCap: 3000, // owner_infomation_package: iwBypassPower > 3000
+    batDcChgW: 1800,
+    batDcDchgW: 1800,
     pids: ["c4ilzd7aybycece9"],
+  },
+  {
+    id: "CBE5000",
+    label: "CBE5000",
+    badge: "CBE5000",
+    maxExport: 2048,
+    bypassCap: 3000,
+    batDcChgW: 2500,
+    batDcDchgW: 2500,
+    pids: ["sl8ynevg5zhtkvsc"],
   },
   {
     id: "Lyra1500",
     label: "Lyra 1500",
     badge: "Lyra 1500",
     maxExport: 1500,
+    batDcChgW: 1500,
+    batDcDchgW: 1500,
     pids: ["rloz0sela2ltnqqp", "jns5mgxgranqxjq3"],
   },
   {
@@ -26,11 +41,21 @@ const DEVICE_MODELS = [
     label: "atlas 3000",
     badge: "Atlas 3000",
     maxExport: 3000,
+    batDcChgW: 3000,
+    batDcDchgW: 3000,
     pids: ["8lkqbvmmrx043jig"],
   },
 ];
 
-const UNKNOWN_MODEL = { id: "unknown", label: "未知型号", badge: "未知", maxExport: null, pids: [] };
+const UNKNOWN_MODEL = {
+  id: "unknown",
+  label: "未知型号",
+  badge: "未知",
+  maxExport: null,
+  batDcChgW: null,
+  batDcDchgW: null,
+  pids: [],
+};
 
 /** DP98 主机编号：固定 0x0A 表示本机主机槽位 */
 const DP98_MASTER_NUMER = 0x0a;

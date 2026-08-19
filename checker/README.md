@@ -19,7 +19,7 @@
 ## 已知与固件的差异 / 待办
 
 - 家庭电网购电限值：固件标"规划中"、非可读点位 → cluster.js 用可选配置项(UI `#atGridBuyLimit`)兜底充2抑制条件一。
-- 电池 DC 充/放限值：固件 `bat_max_chg_w`(dev/inc + limits 表, `min(1500, curr*272/10)`, 随 SoC/温度)。当前 owner-model 直接读设备上报的 `battery_max_charge_power`；型号表新增的 `bat_dc_chg_w/bat_dc_dchg_w` 可作为读不到时的兜底（尚未接入，见 device-model.js）。
+- 电池最大充：对齐 MCU `Chuneng_chg_map()`（SoC×电芯温度查表 → `(curr*1080*6)/100`，封顶 3000W）。无温度点时按 25℃。SoC=100% 置 0，回落到 95% 才恢复。
 - 期望充电功率应取 `min(AC输入限, 电池DC充电限)`，当前用 gridLim 封顶，待接型号表 DC 限值。
 
 ## 改动纪律

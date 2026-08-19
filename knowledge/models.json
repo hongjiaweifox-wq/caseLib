@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-08-17T08:06:31Z",
+  "updated_at": "2026-08-19T08:29:15Z",
   "models": [
     {
       "id": "CBE2000 Pro",
@@ -11,13 +11,13 @@
       "battery_expand": 0,
       "ac_in_limit_w": 3000,
       "ac_out_limit_w": 3000,
-      "reg_out_limit_w": 3000,
-      "bat_dc_chg_w": 1500,
-      "bat_dc_dchg_w": 1500,
+      "reg_out_limit_w": 2048,
+      "bat_dc_chg_w": 1800,
+      "bat_dc_dchg_w": 1800,
       "pids": [
         "c4ilzd7aybycece9"
       ],
-      "updated_at": "2026-08-17T08:06:31Z"
+      "updated_at": "2026-08-19T08:29:15Z"
     },
     {
       "id": "CBE5000 Pro",
@@ -29,13 +29,13 @@
       "battery_expand": 1,
       "ac_in_limit_w": 3000,
       "ac_out_limit_w": 3000,
-      "reg_out_limit_w": 3000,
-      "bat_dc_chg_w": 1500,
-      "bat_dc_dchg_w": 1500,
+      "reg_out_limit_w": 2048,
+      "bat_dc_chg_w": 1800,
+      "bat_dc_dchg_w": 1800,
       "pids": [
         "sl8ynevg5zhtkvsc"
       ],
-      "updated_at": "2026-08-17T08:06:31Z"
+      "updated_at": "2026-08-19T08:29:15Z"
     },
     {
       "id": "Lyra 2500 AC/Pro（欧标）",
@@ -47,14 +47,14 @@
       "battery_expand": 0,
       "ac_in_limit_w": 1500,
       "ac_out_limit_w": 1500,
-      "reg_out_limit_w": 1500,
+      "reg_out_limit_w": 2048,
       "bat_dc_chg_w": 1500,
       "bat_dc_dchg_w": 1500,
       "pids": [
         "jns5mgxgranqxjq3",
         "rloz0sela2ltnqqp"
       ],
-      "updated_at": "2026-08-17T08:06:31Z"
+      "updated_at": "2026-08-19T08:29:15Z"
     },
     {
       "id": "Lyra 2500 Pro（英规）",
@@ -66,11 +66,11 @@
       "battery_expand": 0,
       "ac_in_limit_w": 1500,
       "ac_out_limit_w": 1500,
-      "reg_out_limit_w": 1500,
+      "reg_out_limit_w": 2048,
       "bat_dc_chg_w": 1500,
       "bat_dc_dchg_w": 1500,
       "pids": [],
-      "updated_at": "2026-08-17T08:06:31Z"
+      "updated_at": "2026-08-19T08:29:15Z"
     },
     {
       "id": "Atlas 6000 AC",
@@ -82,13 +82,13 @@
       "battery_expand": 1,
       "ac_in_limit_w": 3000,
       "ac_out_limit_w": 3000,
-      "reg_out_limit_w": 3000,
-      "bat_dc_chg_w": 1500,
-      "bat_dc_dchg_w": 1500,
+      "reg_out_limit_w": 2048,
+      "bat_dc_chg_w": 3000,
+      "bat_dc_dchg_w": 3000,
       "pids": [
         "8lkqbvmmrx043jig"
       ],
-      "updated_at": "2026-08-17T08:06:31Z"
+      "updated_at": "2026-08-19T08:29:15Z"
     }
   ]
 }

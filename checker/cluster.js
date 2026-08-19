@@ -31,8 +31,10 @@ function _atHomeAgg(home) {
   let pvTotal = 0, loadSum = 0, microSum = 0;
   for (const d of home?.devices || []) {
     const v = d.values || {};
-    pvTotal += Math.max(0, _ownerNum(v.pv_power_total, 0));
-    const og = _ownerNum(v.offgrid1_export_power ?? v.battery_charging_power_grid, 0);
+    pvTotal += typeof _ownerPvW === "function" ? _ownerPvW(d) : Math.max(0, _ownerNum(v.pv_power_total, 0));
+    const og = typeof _ownerBypassW === "function"
+      ? _ownerBypassW(d)
+      : _ownerNum(v.offgrid1_export_power ?? v.battery_charging_power_grid, 0);
     if (og > 0) loadSum += og; else if (og < 0) microSum += -og;
   }
   return { pvTotal, loadSum, microSum };
@@ -103,42 +105,401 @@ function computeMasterExpect(home, opts) {
   return { byUid, chg1Need, disCap, tpv, gridBuyLimit, chg2Suppressed, supp2c1, supp2c2, agg };
 }
 
-const AUTO_TARGETS = [
-  {
-    key: "chg1", target: "充电状态1", expect: "充电状态1",
-    make: (soc) => ({ work_mode: "0", backup_soc: String(_atClampSoc(soc + 11)) }),
-    feasible: (soc) => soc != null && soc + 11 <= 100,
-    note: "备用=SoC+11 → SoC≤备用−10",
-  },
-  {
-    key: "chg2", target: "充电状态2", expect: "充电状态2",
-    make: (soc) => ({ work_mode: "0", backup_soc: String(_atClampSoc(soc + 6)) }),
-    feasible: (soc) => soc != null && soc + 6 <= 100 && soc >= 0,
-    note: "备用=SoC+6 → SoC≤备用−5（自发自用）",
-  },
-  {
-    key: "cc", target: "可充可放", expect: "可充可放",
-    make: (soc) => ({ work_mode: "0", backup_soc: String(_atClampSoc(soc - 6)) }),
-    feasible: (soc) => soc != null && soc > 0 && soc < 100,
-    note: "备用<SoC<100",
-  },
+const AUTO_TARGET_CATALOG = [
+  { key: "disabled", target: "禁充禁放", cat: "disabled" },
+  { key: "discharge", target: "放电", cat: "discharge" },
+  { key: "candis", target: "可放", cat: "candis" },
+  { key: "chg1", target: "充电状态1", cat: "chg1" },
+  { key: "chg2", target: "充电状态2", cat: "chg2" },
+  { key: "canchg", target: "可充", cat: "canchg" },
+  { key: "cc", target: "可充可放", cat: "cc" },
 ];
+
+function _atDeviceVal(device, keys, fallback = null) {
+  for (const key of keys) {
+    const value = device?.values?.[key];
+    if (value != null && value !== "") {
+      return value;
+    }
+  }
+  return fallback;
+}
+
+function _atNum(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function _atLimit(device, keys, fallback) {
+  return Math.max(0, Math.round(_atNum(_atDeviceVal(device, keys, fallback), fallback)));
+}
+
+function _atBaseParams(device) {
+  return {
+    work_mode: String(_atDeviceVal(device, ["work_mode"], "0") || "0"),
+    backup_soc: String(_atClampSoc(_atNum(_atDeviceVal(device, ["backup_soc", "backup_reserve", "min_soc_discharge"], 20), 20))),
+    output_power_limit: String(_atLimit(device, ["output_power_limit", "regulation_grid_export_p_limit"], modelMeta(device).maxExport || 1500)),
+    inverter_input_power_limit: String(_atLimit(device, ["inverter_input_power_limit"], modelMeta(device).maxExport || 1500)),
+    regulation_grid_export_p_limit: String(_atLimit(device, ["regulation_grid_export_p_limit", "output_power_limit"], modelMeta(device).maxExport || 1500)),
+  };
+}
+
+function _atPickNaturalStrategy(target, currentLabel) {
+  if (currentLabel !== target) {
+    return null;
+  }
+  return {
+    key: "natural-match",
+    coverageKey: "natural",
+    feasible: true,
+    params: {},
+    note: "当前设备已命中目标工况，无需额外下发",
+    basis: `当前读回态=${currentLabel}`,
+    risk: "low",
+    rollbackNeeded: false,
+  };
+}
+
+function _atStrategy(key, coverageKey, params, note, basis, extra = {}) {
+  return {
+    key,
+    coverageKey,
+    feasible: extra.feasible !== false,
+    params: params || {},
+    note: note || "",
+    basis: basis || "",
+    risk: extra.risk || "low",
+    rollbackNeeded: extra.rollbackNeeded !== false,
+    hal: extra.hal || null,
+    labOnly: !!extra.labOnly,
+  };
+}
+
+function _atUnreachableStrategy(key, coverageKey, note, basis) {
+  return _atStrategy(key, coverageKey, {}, note, basis, {
+    feasible: false,
+    risk: "high",
+    rollbackNeeded: false,
+  });
+}
+
+function _atStrategiesForTarget(device, target, home) {
+  if (typeof instantiateConstructRecipes === "function") {
+    return instantiateConstructRecipes(device, target, home);
+  }
+  return [
+    _atUnreachableStrategy(
+      `${target}-nolib`,
+      "unknown",
+      "工况构造库未加载。",
+      "请加载 checker/construct-lib.js"
+    ),
+  ];
+}
+
+function getAutoTargetCatalog() {
+  return AUTO_TARGET_CATALOG.map((item) => ({ ...item }));
+}
+
+function buildAutoDeviceScenarioPlan(device, home) {
+  const current = classifyOwnerWorkModel(device);
+  const scenarios = getAutoTargetCatalog().map((target) => {
+    const strategies = _atStrategiesForTarget(device, target.target, home);
+    const feasible = strategies.some((item) => item.feasible);
+    const shownStrategies = _atShownStrategies(strategies);
+    const visibleRecommended = shownStrategies[0]
+      || strategies.find((item) => item.feasible && item.coverageKey !== "natural" && !item.labOnly)
+      || strategies.find((item) => item.feasible && item.coverageKey !== "natural")
+      || strategies.find((item) => item.feasible)
+      || strategies[0]
+      || null;
+    return {
+      key: target.key,
+      target: target.target,
+      cat: target.cat,
+      uid: device.uid,
+      device: device.name || device.deviceId,
+      currentLabel: current ? current.label : "—",
+      feasible,
+      strategyCount: strategies.length,
+      strategies,
+      shownStrategies,
+      recommended: visibleRecommended,
+      note: feasible
+        ? (visibleRecommended || {}).note || ""
+        : strategies.map((item) => item.note).filter(Boolean).join("；"),
+    };
+  });
+  return {
+    uid: device.uid,
+    deviceId: device.deviceId,
+    device: device.name || device.deviceId,
+    currentLabel: current ? current.label : "—",
+    soc: _atSoc(device),
+    scenarios,
+  };
+}
+
+function buildAutoDevicePlans(home) {
+  return (home?.devices || []).map((device) => buildAutoDeviceScenarioPlan(device, home));
+}
+
+const AT_TARGET_SHORT = {
+  "充电状态1": "充电1",
+  "充电状态2": "充电2",
+  "可充可放": "可充可放",
+  "可充": "可充",
+  "可放": "可放",
+  "放电": "放电",
+  "禁充禁放": "禁充禁放",
+};
+
+function _atShortTarget(label) {
+  return AT_TARGET_SHORT[label] || label;
+}
+
+function _atComboKey(assignments) {
+  return (assignments || []).map((item) =>
+    `${item.uid || item.deviceId || ""}:${item.target || ""}:${item.strategyKey || item.coverageKey || ""}`
+  ).join("|");
+}
+
+function cycleMatchesScope(cycle, opts) {
+  opts = opts || {};
+  const assigns = cycle?.assignments || [];
+  const q = String(opts.deviceId || "").trim().toLowerCase();
+  const target = String(opts.target || "").trim();
+  let pool = assigns;
+  if (q) {
+    pool = assigns.filter((item) =>
+      String(item.deviceId || "").toLowerCase().includes(q) ||
+      String(item.device || "").toLowerCase().includes(q) ||
+      String(item.uid || "").toLowerCase().includes(q)
+    );
+    if (!pool.length) {
+      return false;
+    }
+  }
+  if (target) {
+    return pool.some((item) => item.target === target);
+  }
+  return true;
+}
+
+function pickComboCycles(cycles, picks) {
+  const list = cycles || [];
+  if (!picks) {
+    return list.slice();
+  }
+  return list.filter((cycle) => picks[cycle.key] !== false);
+}
+
+function _atCartesian(arrays) {
+  if (!arrays.length) {
+    return [];
+  }
+  return arrays.reduce((acc, curr) => {
+    if (!acc.length) {
+      return curr.map((item) => [item]);
+    }
+    const out = [];
+    for (const prefix of acc) {
+      for (const item of curr) {
+        out.push([...prefix, item]);
+      }
+    }
+    return out;
+  }, []);
+}
+
+const AT_MAX_COMBO_CYCLES = 2000;
+
+function _atCartesianCapped(arrays, limit) {
+  if (!arrays.length) {
+    return [];
+  }
+  const max = Math.max(1, Number(limit) || AT_MAX_COMBO_CYCLES);
+  return arrays.reduce((acc, curr) => {
+    if (!acc.length) {
+      return curr.slice(0, max).map((item) => [item]);
+    }
+    const out = [];
+    for (const prefix of acc) {
+      for (const item of curr) {
+        out.push([...prefix, item]);
+        if (out.length >= max) {
+          return out;
+        }
+      }
+    }
+    return out;
+  }, []);
+}
+
+function _atComboAssignment(plan, scenario, strategy) {
+  return {
+    uid: plan.uid,
+    deviceId: plan.deviceId,
+    device: plan.device,
+    target: scenario.target,
+    strategyKey: strategy.key,
+    coverageKey: strategy.coverageKey,
+    params: { ...(strategy.params || {}) },
+    note: strategy.note || "",
+    basis: strategy.basis || "",
+  };
+}
+
+function _atStrategyGroupKey(strategy) {
+  if (!strategy) {
+    return "";
+  }
+  if (strategy.labOnly) {
+    return strategy.coverageKey || strategy.key || "lab";
+  }
+  const params = strategy.params || {};
+  if (params.backup_soc != null) {
+    return "backup_soc";
+  }
+  if (strategy.coverageKey === "limit_zero") {
+    return "limit_zero";
+  }
+  return strategy.coverageKey || strategy.key || "dp";
+}
+
+function _atShownStrategies(strategies) {
+  const feasible = (strategies || []).filter((item) => item && item.feasible && item.coverageKey !== "natural");
+  if (!feasible.length) {
+    return [];
+  }
+  const primary = feasible.find((item) => !item.labOnly) || feasible[0];
+  const primaryGroup = _atStrategyGroupKey(primary);
+  const extra = feasible.find((item) => item.key !== primary.key && _atStrategyGroupKey(item) !== primaryGroup) || null;
+  return extra ? [primary, extra] : [primary];
+}
+
+function _atTargetWanted(selectedTargets, uid, scenario) {
+  if (!selectedTargets) {
+    return true;
+  }
+  const map = selectedTargets[uid];
+  if (!map) {
+    return true;
+  }
+  if (map[scenario.key] === false || map[scenario.target] === false) {
+    return false;
+  }
+  return true;
+}
+
+/** Selected devices × checked feasible targets → Cartesian combinations like dev1[充电1] / dev2[充电2]. */
+function buildComboExecutionPlan(home, selectedUids, selectedTargets) {
+  const uidSet = new Set(selectedUids || []);
+  const devicePlans = buildAutoDevicePlans(home).filter((plan) => uidSet.has(plan.uid));
+  const perDeviceOptions = devicePlans.map((plan) => {
+    const options = [];
+    for (const scenario of plan.scenarios) {
+      if (!scenario.feasible) {
+        continue;
+      }
+      if (!_atTargetWanted(selectedTargets, plan.uid, scenario)) {
+        continue;
+      }
+      const visible = Array.isArray(scenario.shownStrategies) && scenario.shownStrategies.length
+        ? scenario.shownStrategies
+        : (scenario.recommended ? [scenario.recommended] : []);
+      const choices = visible.filter((strategy) => strategy && strategy.feasible);
+      if (!choices.length) {
+        continue;
+      }
+      for (const strategy of choices) {
+        options.push(_atComboAssignment(plan, scenario, strategy));
+      }
+    }
+    return { plan, options };
+  });
+  if (!perDeviceOptions.length || perDeviceOptions.some((entry) => !entry.options.length)) {
+    return { devicePlans, cycles: [], incomplete: true };
+  }
+  const optionArrays = perDeviceOptions.map((entry) => entry.options);
+  const totalCycles = optionArrays.reduce((acc, arr) => acc * Math.max(1, arr.length), 1);
+  const truncated = totalCycles > AT_MAX_COMBO_CYCLES;
+  const combos = truncated ? _atCartesianCapped(optionArrays, AT_MAX_COMBO_CYCLES) : _atCartesian(optionArrays);
+  let no = 0;
+  const cycles = combos.map((assignments) => {
+    no += 1;
+    const label = assignments.map((item) => `${item.device}[${_atShortTarget(item.target)}]`).join(" / ");
+    return {
+      no,
+      key: _atComboKey(assignments),
+      label,
+      assignments,
+      status: "ready",
+      step: "ready",
+    };
+  });
+  return { devicePlans, cycles, incomplete: false, truncated, totalCycles };
+}
+
+function buildAutoExecutionPlan(home, selectedUids, selectedTargets) {
+  if (Array.isArray(selectedUids) && selectedUids.length) {
+    return buildComboExecutionPlan(home, selectedUids, selectedTargets);
+  }
+  const devicePlans = buildAutoDevicePlans(home);
+  const cycles = [];
+  let no = 0;
+  for (const plan of devicePlans) {
+    for (const scenario of plan.scenarios) {
+      const visible = Array.isArray(scenario.shownStrategies) && scenario.shownStrategies.length
+        ? scenario.shownStrategies
+        : scenario.strategies;
+      for (const strategy of visible) {
+        if (!strategy.feasible) {
+          continue;
+        }
+        no += 1;
+        cycles.push({
+          no,
+          uid: plan.uid,
+          deviceId: plan.deviceId,
+          device: plan.device,
+          target: scenario.target,
+          label: `${plan.device}[${_atShortTarget(scenario.target)}]`,
+          assignments: [_atComboAssignment(plan, scenario, strategy)],
+          currentLabel: scenario.currentLabel,
+          strategyKey: strategy.key,
+          coverageKey: strategy.coverageKey,
+          params: { ...strategy.params },
+          note: strategy.note,
+          basis: strategy.basis,
+          rollbackNeeded: strategy.rollbackNeeded !== false,
+          status: "ready",
+          step: "ready",
+        });
+      }
+    }
+  }
+  return { devicePlans, cycles, incomplete: false };
+}
+
+const AUTO_TARGETS = getAutoTargetCatalog();
 
 function buildAutoMatrix(home) {
   const rows = [];
-  for (const dev of home?.devices || []) {
-    const soc = _atSoc(dev);
-    for (const t of AUTO_TARGETS) {
-      const ok = t.feasible(soc);
+  for (const plan of buildAutoDevicePlans(home)) {
+    for (const scenario of plan.scenarios) {
+      const recommended = scenario.recommended;
       rows.push({
-        uid: dev.uid,
-        device: dev.name || dev.deviceId,
-        soc,
-        target: t.target,
-        expect: t.expect,
-        params: ok ? t.make(soc) : null,
-        feasible: !!ok,
-        note: ok ? t.note : soc == null ? "未读到 SoC，先「一键读取」" : "当前 SoC 下该目标软不可达",
+        uid: plan.uid,
+        device: plan.device,
+        soc: plan.soc,
+        target: scenario.target,
+        expect: scenario.target,
+        params: recommended?.params || null,
+        feasible: !!scenario.feasible,
+        note: scenario.note || "",
+        strategies: scenario.strategies,
+        strategyCount: scenario.strategyCount,
       });
     }
   }

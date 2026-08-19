@@ -8,7 +8,7 @@
   <link rel="shortcut icon" href="/app-icon-20260806.png" />
   <link rel="apple-touch-icon" href="/app-icon-20260806.png" />
   <link rel="icon" href="/favicon.svg?v=20260806-57" type="image/svg+xml" />
-  <link rel="stylesheet" href="/style.css?v=20260818-caselib44" />
+  <link rel="stylesheet" href="/style.css?v=20260819-caselib96" />
 </head>
 <body>
   <div id="app" class="layout">
@@ -47,7 +47,6 @@
               <button type="button" class="btn btn-ghost" id="btnReadAll">一键读取</button>
               <button type="button" class="btn btn-primary" id="btnIssueAll" disabled>一键下发</button>
               <button type="button" class="btn btn-ghost" id="btnSaveSnapshot" title="将当前实时运行情况截图保存到本机浏览器">保存快照</button>
-              <button type="button" class="btn btn-ghost" id="btnAutoTest" title="按 S1–S13 软下发排列组合，自动跑工况并出报告">自动回归测试</button>
             </div>
             <button type="button" class="btn btn-ghost" id="btnRefreshDevices">刷新设备</button>
             <button type="button" class="btn btn-ghost" id="btnAddMeter">+ 添加电表</button>
@@ -120,6 +119,45 @@
           </div>
           <div id="snapshotsHost" class="snapshots-host"></div>
         </div>
+
+        <div id="tabAuto" class="home-tab-panel hidden" role="tabpanel">
+          <div class="home-tabs at-sub-tabs" id="autoInnerTabs" role="tablist">
+            <button type="button" class="home-tab active" data-at-tab="lib" role="tab" aria-selected="true">工况构造</button>
+            <button type="button" class="home-tab" data-at-tab="run" role="tab" aria-selected="false">运行</button>
+            <button type="button" class="home-tab" data-at-tab="report" role="tab" aria-selected="false">报告</button>
+          </div>
+
+          <div id="atPanelLib" class="at-sub-panel">
+            <p class="hint hidden" id="autoTestHintLib">工况构造库：每个工况如何用可写 DP 下发组合达到。后续只维护本库。</p>
+            <div id="autoTestLibBody"></div>
+          </div>
+
+          <div id="atPanelRun" class="at-sub-panel hidden">
+            <div class="at-run-toolbar">
+              <label class="at-opt at-home-pick">家庭<select id="atHomeSelectRun"></select></label>
+              <label class="at-opt">周期(秒)<input type="number" id="atSettle" min="3" max="120" step="1" value="15" /></label>
+              <label class="at-opt" title="家庭电网购电限值(规划中·非可读点位)。填了才启用充2抑制条件一：充1需求>电网限+三方光伏。留空则仅用条件二(可放总+三方)。">电网购电限(W)<input type="number" id="atGridBuyLimit" min="0" step="100" placeholder="留空=不用" style="width:96px" /></label>
+              <label class="at-opt" title="三方光伏(W)。默认取各机 bypass 口三方光伏倒灌之和；可手动覆盖。">三方光伏(W)<input type="number" id="atThirdPv" min="0" step="100" placeholder="默认实测" style="width:88px" /></label>
+              <label class="at-opt"><input type="checkbox" id="atRestore" checked /> 结束后恢复原参数</label>
+              <button type="button" class="btn btn-ghost btn-sm" id="btnAutoTestReload">刷新用例</button>
+              <button type="button" class="btn btn-ghost btn-sm hidden" id="btnAutoTestPause">暂停</button>
+              <button type="button" class="btn btn-primary btn-sm" id="btnAutoTestRun">开始自动测试</button>
+            </div>
+            <p class="hint" id="autoTestHint"></p>
+            <div id="autoTestProgress" class="at-progress hidden"></div>
+            <div id="autoTestBody"></div>
+            <div id="autoTestTimeline" class="at-timeline hidden"></div>
+          </div>
+
+          <div id="atPanelReport" class="at-sub-panel hidden">
+            <div class="at-run-toolbar">
+              <label class="at-opt at-home-pick">家庭<select id="atHomeSelectReport"></select></label>
+              <label class="at-opt at-report-pick">报告<select id="atReportSelect"></select></label>
+              <span class="hint" id="atReportPickHint">先选家庭，默认打开最新一份报告，可改选其它。</span>
+            </div>
+            <div id="autoTestReport" class="at-report hidden"></div>
+          </div>
+        </div>
       </div>
 
       <!-- Sub-page: 数据区登录态（分组表格，占据主区） -->
@@ -135,29 +173,6 @@
         </div>
         <p class="hint" id="loginMgrHint"></p>
         <div id="loginMgrBody"></div>
-      </section>
-
-      <!-- Sub-page: 自动回归测试（按 S1–S13 软下发排列组合，自动跑工况并出报告） -->
-      <section id="autoTestView" class="hidden">
-        <div class="loginmgr-head">
-          <div class="loginmgr-title">
-            <button type="button" class="btn btn-ghost" id="btnAutoTestBack">‹ 返回</button>
-            <h2>自动回归测试</h2>
-          </div>
-          <div class="loginmgr-actions">
-            <label class="at-opt">周期(秒)<input type="number" id="atSettle" min="3" max="120" step="1" value="15" /></label>
-            <label class="at-opt" title="家庭电网购电限值(规划中·非可读点位)。填了才启用充2抑制条件一：充1需求>电网限+三方光伏。留空则仅用条件二(可放总+三方)。">电网购电限(W)<input type="number" id="atGridBuyLimit" min="0" step="100" placeholder="留空=不用" style="width:96px" /></label>
-            <label class="at-opt" title="三方光伏(W)。默认取各机 bypass 口三方光伏倒灌之和；可手动覆盖。">三方光伏(W)<input type="number" id="atThirdPv" min="0" step="100" placeholder="默认实测" style="width:88px" /></label>
-            <label class="at-opt"><input type="checkbox" id="atRestore" checked /> 结束后恢复原参数</label>
-            <button type="button" class="btn btn-ghost" id="btnAutoTestReload">刷新矩阵</button>
-            <button type="button" class="btn btn-primary" id="btnAutoTestRun">开始自动测试</button>
-          </div>
-        </div>
-        <p class="hint" id="autoTestHint"></p>
-        <div id="autoTestProgress" class="at-progress hidden"></div>
-        <div id="autoTestTimeline" class="at-timeline hidden"></div>
-        <div id="autoTestBody"></div>
-        <div id="autoTestReport" class="at-report hidden"></div>
       </section>
     </main>
   </div>
@@ -411,14 +426,26 @@
     <button type="button" class="snap-fs-close" id="btnSnapFsClose" title="退出全屏">×</button>
   </div>
 
+  <div id="atFramePeek" class="at-frame-peek hidden">
+    <div class="at-frame-peek-head" id="atFramePeekHead">
+      <span id="atFramePeekTitle">过程截图</span>
+      <button type="button" class="at-frame-peek-close" id="atFramePeekClose" title="关闭预览">×</button>
+    </div>
+    <div class="at-frame-peek-view" id="atFramePeekView">
+      <img id="atFramePeekImg" alt="frame preview" draggable="false" />
+    </div>
+    <span class="at-frame-peek-resize" id="atFramePeekResize" title="拖拽左下角缩放窗口"></span>
+  </div>
+
   <div id="toast" class="toast hidden"></div>
   <script src="/html2canvas.min.js"></script>
   <!-- 层3 checker 固件运行逻辑（对齐 CBE_RESONATE_MASTER）：先于 flow.js/app.js 加载 -->
-  <script src="/checker/device-model.js?v=20260817-caselib9"></script>
-  <script src="/checker/owner-model.js?v=20260817-caselib9"></script>
+  <script src="/checker/device-model.js?v=20260819-caselib96"></script>
+  <script src="/checker/owner-model.js?v=20260819-caselib96"></script>
   <script src="/checker/dp98.js?v=20260818-caselib42"></script>
-  <script src="/checker/cluster.js?v=20260817-caselib9"></script>
-  <script src="/flow.js?v=20260818-caselib44"></script>
-  <script src="/app.js?v=20260818-caselib41"></script>
+  <script src="/checker/cluster.js?v=20260819-caselib96"></script>
+  <script src="/checker/construct-lib.js?v=20260819-caselib96"></script>
+  <script src="/flow.js?v=20260819-caselib96"></script>
+  <script src="/app.js?v=20260819-caselib96"></script>
 </body>
 </html>

@@ -111,7 +111,7 @@ const BIZLOG_EVENT_IDS =
 // [moved → checker/device-model.js] DEVICE_MODELS / UNKNOWN_MODEL
 
 const DP_DISPLAY = [
-  { code: "pv_power_total", label: "发电功率", unit: "W", tone: "", aliases: ["pv_power_total"] },
+  { code: "pv_power_total", label: "发电功率", unit: "W", tone: "", aliases: ["pv_power_total", "total_photovoltaic_power"] },
   { code: "battery_power", label: "电池功率", unit: "W", tone: "green", aliases: ["battery_power"] },
   {
     code: "grid_port_power",
@@ -184,6 +184,10 @@ const DP_SHADOW_EXTRA = [
     fallbackDpId: "98",
     dpSchema: { type: "raw", maxlen: 128 },
   },
+  { code: "pv_power_channel_1", label: "PV1", unit: "W", aliases: ["pv_power_channel_1"] },
+  { code: "pv_power_channel_2", label: "PV2", unit: "W", aliases: ["pv_power_channel_2"] },
+  { code: "pv_power_channel_3", label: "PV3", unit: "W", aliases: ["pv_power_channel_3"] },
+  { code: "pv_power_channel_4", label: "PV4", unit: "W", aliases: ["pv_power_channel_4"] },
 ];
 const DP_SHADOW_EXTRA_CODES = DP_SHADOW_EXTRA.map((d) => d.code);
 
@@ -367,7 +371,7 @@ function openOwnerStrategyDialog(home, device) {
         <div><b>代入量</b></div>
         <div>SoC ${inp.soc}% · 备用 ${inp.back}%</div>
         <div>PV ${inp.pv}W · Bypass ${inp.bypass}W</div>
-        <div>电池最大充 ${inp.batChg}W · 最大放 ${inp.batDchg}W</div>
+        <div>电池最大充 ${inp.batChg}W${inp.fullChg ? "（满电回差置 0）" : inp.chgMapCurr != null ? `（电芯表档 ${inp.chgMapCurr} · ${inp.chgMapTempC}℃）` : ""} · 最大放 ${inp.batDchg}W</div>
         <div>并网充限 ${inp.gridLim}W · 输出限 ${inp.outLim}W · 逆变上限 ${inp.bypassCap}W</div>
       </div>
       <p class="hint" style="margin-top:10px">依据：飞书《从机状态判》· owner_infomation_package（grid 口能力上报主机）</p>`;
@@ -455,7 +459,7 @@ const DEVICE_MORE_POINTS = [
   {
     dpId: "38",
     dpCode: "offgrid1_export_power",
-    modelCode: "battery_charging_power_grid",
+    modelCode: "offgrid1_export_power",
     unit: "W",
     valueKeys: ["offgrid1_export_power", "battery_charging_power_grid"],
   },
@@ -488,6 +492,36 @@ const DEVICE_MORE_POINTS = [
     valueKeys: ["inverter_input_power_limit"],
   },
 ];
+
+function schemaEntryByDpId(schema, dpId) {
+  const id = String(dpId ?? "");
+  if (!id) return null;
+  return Object.values(schema || {}).find((e) => String(e?.dpId) === id) || null;
+}
+
+function morePointDisplay(device, point) {
+  const schema = device?.schema || {};
+  if (point.dpCode === "function_set") {
+    return {
+      dpId: point.dpId,
+      dpCode: point.dpCode,
+      modelCode: point.modelCode,
+      inSchema: !!(schema.function_set || schema[point.modelCode]),
+    };
+  }
+  const hit =
+    schemaEntryByDpId(schema, point.dpId) ||
+    schema[point.dpCode] ||
+    schema[point.modelCode] ||
+    (point.valueKeys || []).map((k) => schema[k]).find(Boolean) ||
+    null;
+  return {
+    dpId: hit?.dpId || point.dpId,
+    dpCode: hit?.dpCode || point.dpCode,
+    modelCode: hit?.dpCode || point.modelCode,
+    inSchema: !!hit,
+  };
+}
 
 function lookupDevicePointValue(device, point) {
   const values = device?.values || {};
@@ -530,9 +564,8 @@ function openDevicePointsDialog(home, device) {
   }`;
   tbody.innerHTML = DEVICE_MORE_POINTS.map((p) => {
     const raw = lookupDevicePointValue(device, p);
-    const inSchema = !!(device.schema && (device.schema[p.dpCode] || device.schema[p.modelCode]));
-    const missing = Object.keys(device.schema || {}).length > 0 && !inSchema && p.dpCode !== "function_set";
-    // function_set 子项：只要有对应 model 值或 schema 有 function_set 就算有
+    const shown = morePointDisplay(device, p);
+    const missing = Object.keys(device.schema || {}).length > 0 && !shown.inSchema && p.dpCode !== "function_set";
     const fsMissing =
       p.dpCode === "function_set" &&
       Object.keys(device.schema || {}).length > 0 &&
@@ -540,9 +573,9 @@ function openDevicePointsDialog(home, device) {
       raw == null;
     const rowMissing = missing || fsMissing;
     return `<tr class="${rowMissing ? "point-missing" : ""}">
-      <td>${escapeHtml(p.dpId)}</td>
-      <td><code>${escapeHtml(p.dpCode)}</code></td>
-      <td><code>${escapeHtml(p.modelCode)}</code></td>
+      <td>${escapeHtml(shown.dpId)}</td>
+      <td><code>${escapeHtml(shown.dpCode)}</code></td>
+      <td><code>${escapeHtml(shown.modelCode)}</code></td>
       <td class="point-val">${escapeHtml(formatPointValue(raw, p))}</td>
     </tr>`;
   }).join("");
@@ -1916,6 +1949,8 @@ function setBusLink(home, aId, bId) {
 /** Session canvas selection: terminals + one wire */
 let liveCanvasSel = { buses: new Set(), wire: null };
 let liveCanvasDragging = false;
+let liveCanvasZoom = 1;
+let liveCanvasPinching = false;
 
 function liveCanvasTypingTarget(el) {
   if (!el) return false;
@@ -3055,7 +3090,11 @@ async function readDevice(home, device, opts = {}) {
           (field.aliases || []).map((a) => byCode[a]).find(Boolean);
         if (!hit) continue;
         const rawVal = hit.valueObject ?? hit.value ?? hit.dpValue;
-        values[field.code] = toDisplayValue(rawVal, entry.dpSchema, field.unit);
+        const display = toDisplayValue(rawVal, entry.dpSchema, field.unit);
+        values[field.code] = display;
+        if (entry.dpCode && entry.dpCode !== field.code) {
+          values[entry.dpCode] = display;
+        }
       }
     }
 
@@ -4132,8 +4171,10 @@ function renderSidebar() {
   }
 }
 
-/** @type {'live'|'charts'|'election'|'snapshots'} */
+/** @type {'live'|'charts'|'election'|'snapshots'|'auto'} */
 let homeTab = "live";
+/** @type {'home'|'auto'} 由顶栏「实时运行 / 自动化」切换 */
+let uiShell = "home";
 
 const SNAPSHOT_KEY = "groupAppControl.snapshots.v1";
 const SNAPSHOT_MAX = 12;
@@ -4700,24 +4741,33 @@ async function mountElectionPanel(home) {
   if (electionPollEnabled) ensureElectionPollTimer();
 }
 
+function applyUiShell(shell) {
+  const next = shell === "auto" ? "auto" : "home";
+  const changed = uiShell !== next;
+  uiShell = next;
+  document.body.classList.toggle("shell-auto", next === "auto");
+  if (next === "auto") {
+    homeTab = "auto";
+  } else if (homeTab === "auto") {
+    homeTab = "live";
+  }
+  if (changed) {
+    render();
+  } else {
+    _syncHomeTabPanels();
+  }
+}
+
 function setHomeTab(tab) {
-  homeTab =
-    tab === "charts"
-      ? "charts"
-      : tab === "snapshots"
-        ? "snapshots"
-        : tab === "election"
-          ? "election"
-          : "live";
-  document.querySelectorAll("#homeTabs .home-tab").forEach((btn) => {
-    const on = btn.getAttribute("data-tab") === homeTab;
-    btn.classList.toggle("active", on);
-    btn.setAttribute("aria-selected", on ? "true" : "false");
-  });
-  document.getElementById("tabLive")?.classList.toggle("hidden", homeTab !== "live");
-  document.getElementById("tabCharts")?.classList.toggle("hidden", homeTab !== "charts");
-  document.getElementById("tabElection")?.classList.toggle("hidden", homeTab !== "election");
-  document.getElementById("tabSnapshots")?.classList.toggle("hidden", homeTab !== "snapshots");
+  if (uiShell === "auto") {
+    homeTab = "auto";
+    _syncHomeTabPanels();
+    renderAutoTest();
+    return;
+  }
+  const allowed = ["live", "charts", "snapshots", "election"];
+  homeTab = allowed.includes(tab) ? tab : "live";
+  _syncHomeTabPanels();
   if (homeTab === "charts") {
     const home = activeHome();
     if (home) {
@@ -4742,6 +4792,22 @@ function setHomeTab(tab) {
   if (homeTab === "snapshots") {
     mountSnapshotsPanel();
   }
+  if (homeTab === "auto") {
+    renderAutoTest();
+  }
+}
+
+function _syncHomeTabPanels() {
+  document.querySelectorAll("#homeTabs .home-tab").forEach((btn) => {
+    const on = btn.getAttribute("data-tab") === homeTab;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  document.getElementById("tabLive")?.classList.toggle("hidden", homeTab !== "live");
+  document.getElementById("tabCharts")?.classList.toggle("hidden", homeTab !== "charts");
+  document.getElementById("tabElection")?.classList.toggle("hidden", homeTab !== "election");
+  document.getElementById("tabSnapshots")?.classList.toggle("hidden", homeTab !== "snapshots");
+  document.getElementById("tabAuto")?.classList.toggle("hidden", uiShell !== "auto");
 }
 
 let uiRoute = "home"; // "home" | "loginMgr"（不入 store）
@@ -4750,25 +4816,28 @@ function renderMain() {
   const empty = document.getElementById("emptyState");
   const view = document.getElementById("homeView");
   const lm = document.getElementById("loginMgrView");
-  const at = document.getElementById("autoTestView");
   if (uiRoute === "loginMgr") {
     empty.classList.add("hidden");
     view.classList.add("hidden");
-    if (at) at.classList.add("hidden");
     if (lm) lm.classList.remove("hidden");
     renderLoginMgr();
     return;
   }
-  if (uiRoute === "autotest") {
+  if (lm) lm.classList.add("hidden");
+  if (uiShell === "auto") {
     empty.classList.add("hidden");
-    view.classList.add("hidden");
-    if (lm) lm.classList.add("hidden");
-    if (at) at.classList.remove("hidden");
-    if (!atRunning) renderAutoTest();
+    view.classList.remove("hidden");
+    const home = activeHome();
+    document.getElementById("homeTitle").textContent = "自动化";
+    document.getElementById("homeMeta").textContent = home
+      ? `${homeDisplayName(home)}${home.homeId ? ` · ${home.homeId}` : ""} · ${homeLiveDevices(home).length} 台设备`
+      : "运行 / 报告时请选择家庭";
+    const hasCookie = Object.values(state.cookies || {}).some(Boolean);
+    document.getElementById("cookieBanner")?.classList.toggle("hidden", hasCookie);
+    _syncHomeTabPanels();
+    renderAutoTest();
     return;
   }
-  if (lm) lm.classList.add("hidden");
-  if (at) at.classList.add("hidden");
   const home = activeHome();
   if (!home) {
     empty.classList.remove("hidden");
@@ -4803,15 +4872,7 @@ function renderMain() {
   }
   if (bannerBtn) bannerBtn.classList.toggle("hidden", !onLocal);
 
-  document.getElementById("tabLive")?.classList.toggle("hidden", homeTab !== "live");
-  document.getElementById("tabCharts")?.classList.toggle("hidden", homeTab !== "charts");
-  document.getElementById("tabElection")?.classList.toggle("hidden", homeTab !== "election");
-  document.getElementById("tabSnapshots")?.classList.toggle("hidden", homeTab !== "snapshots");
-  document.querySelectorAll("#homeTabs .home-tab").forEach((btn) => {
-    const on = btn.getAttribute("data-tab") === homeTab;
-    btn.classList.toggle("active", on);
-    btn.setAttribute("aria-selected", on ? "true" : "false");
-  });
+  _syncHomeTabPanels();
 
   const host = document.getElementById("flowHost");
   const canvasView = captureLiveCanvasView();
@@ -4827,6 +4888,9 @@ function renderMain() {
   }
   if (homeTab === "snapshots") {
     mountSnapshotsPanel();
+  }
+  if (uiShell === "auto" || homeTab === "auto") {
+    renderAutoTest();
   }
 }
 
@@ -5388,6 +5452,113 @@ function bindBusMove(home, host) {
   });
 }
 
+function applyLiveCanvasZoom(host) {
+  const wrap = host?.querySelector?.(".flow-svg-wrap") || document.querySelector("#flowHost .flow-svg-wrap");
+  const svg = wrap?.querySelector("svg.flow-svg");
+  if (!wrap || !svg) {
+    return;
+  }
+  const vb = String(svg.getAttribute("viewBox") || "").trim().split(/\s+/);
+  const baseW = Number(svg.getAttribute("width")) || Number(vb[2]) || svg.clientWidth || 1;
+  const baseH = Number(svg.getAttribute("height")) || Number(vb[3]) || svg.clientHeight || 1;
+  const scale = Math.max(0.45, Math.min(3, liveCanvasZoom));
+  liveCanvasZoom = scale;
+  svg.style.width = `${Math.round(baseW * scale)}px`;
+  svg.style.height = `${Math.round(baseH * scale)}px`;
+}
+
+function zoomLiveCanvasAt(wrap, clientX, clientY, nextScale) {
+  const prev = liveCanvasZoom;
+  const scale = Math.max(0.45, Math.min(3, nextScale));
+  if (!wrap || prev <= 0) {
+    liveCanvasZoom = scale;
+    applyLiveCanvasZoom(wrap?.closest?.("#flowHost") || wrap);
+    return;
+  }
+  const rect = wrap.getBoundingClientRect();
+  const cx = wrap.scrollLeft + (clientX - rect.left);
+  const cy = wrap.scrollTop + (clientY - rect.top);
+  const ratio = scale / prev;
+  liveCanvasZoom = scale;
+  applyLiveCanvasZoom(wrap.closest("#flowHost") || wrap);
+  wrap.scrollLeft = cx * ratio - (clientX - rect.left);
+  wrap.scrollTop = cy * ratio - (clientY - rect.top);
+}
+
+/**
+ * @brief Two-finger pinch / trackpad pinch to zoom the live energy canvas
+ * @param[in] host flow host element
+ * @return none
+ */
+function bindLiveCanvasPinchZoom(host) {
+  const wrap = host.querySelector(".flow-svg-wrap");
+  if (!wrap) {
+    return;
+  }
+  applyLiveCanvasZoom(host);
+  const pointers = new Map();
+  let pinch = null;
+  let gestureBase = 1;
+  wrap.addEventListener(
+    "wheel",
+    (ev) => {
+      if (!(ev.ctrlKey || ev.metaKey)) {
+        return;
+      }
+      ev.preventDefault();
+      const factor = Math.exp(-ev.deltaY * 0.012);
+      zoomLiveCanvasAt(wrap, ev.clientX, ev.clientY, liveCanvasZoom * factor);
+    },
+    { passive: false }
+  );
+  wrap.addEventListener("pointerdown", (ev) => {
+    if (liveCanvasTypingTarget(ev.target)) {
+      return;
+    }
+    pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    if (pointers.size >= 2) {
+      liveCanvasPinching = true;
+      const pts = [...pointers.values()];
+      pinch = {
+        dist: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y),
+        scale: liveCanvasZoom,
+      };
+    }
+  });
+  wrap.addEventListener("pointermove", (ev) => {
+    if (!pointers.has(ev.pointerId)) {
+      return;
+    }
+    pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    if (pointers.size < 2 || !pinch || pinch.dist < 8) {
+      return;
+    }
+    ev.preventDefault();
+    const pts = [...pointers.values()];
+    const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    const cx = (pts[0].x + pts[1].x) / 2;
+    const cy = (pts[0].y + pts[1].y) / 2;
+    zoomLiveCanvasAt(wrap, cx, cy, pinch.scale * (dist / pinch.dist));
+  });
+  const endPtr = (ev) => {
+    pointers.delete(ev.pointerId);
+    if (pointers.size < 2) {
+      pinch = null;
+      liveCanvasPinching = false;
+    }
+  };
+  wrap.addEventListener("pointerup", endPtr);
+  wrap.addEventListener("pointercancel", endPtr);
+  wrap.addEventListener("gesturestart", (ev) => {
+    ev.preventDefault();
+    gestureBase = liveCanvasZoom;
+  });
+  wrap.addEventListener("gesturechange", (ev) => {
+    ev.preventDefault();
+    zoomLiveCanvasAt(wrap, ev.clientX, ev.clientY, gestureBase * ev.scale);
+  });
+}
+
 /** Empty-canvas drag: marquee-select terminals. */
 function bindLiveMarquee(home, host) {
   const svg = host.querySelector("svg.flow-svg");
@@ -5403,6 +5574,7 @@ function bindLiveMarquee(home, host) {
   };
   svg.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
+    if (liveCanvasPinching || !e.isPrimary) return;
     if (
       e.target.closest?.(
         ".wire-plug, .wire-port-pad, .wire-bus-node, .u3, foreignObject, .wire-select-hit, [data-select-wire], [data-wire-src], .live-card-resize, [data-card-resize]"
@@ -5415,6 +5587,9 @@ function bindLiveMarquee(home, host) {
     let box = null;
     liveCanvasDragging = true;
     const onMove = (ev) => {
+      if (liveCanvasPinching) {
+        return;
+      }
       const p1 = toSvg(ev.clientX, ev.clientY);
       const x = Math.min(p0.x, p1.x);
       const y = Math.min(p0.y, p1.y);
@@ -5789,6 +5964,7 @@ function bindFlowHost(home) {
   bindWiringDrag(home, host);
   bindLiveMarquee(home, host);
   bindLiveCardResize(home, host);
+  bindLiveCanvasPinchZoom(host);
 
   host.querySelectorAll(".u3[data-device-uid]").forEach((card) => {
     const device = home.devices.find((d) => d.uid === card.getAttribute("data-device-uid"));
@@ -6105,6 +6281,103 @@ function canvasToJpegDataUrl(sourceCanvas, maxW, quality) {
   return c.toDataURL("image/jpeg", quality);
 }
 
+/**
+ * @brief Crop near-background empty rows/cols so the snapshot is not letterboxed
+ * @param[in] canvas source canvas
+ * @return cropped canvas
+ */
+function trimCanvasWhitespace(canvas) {
+  if (!canvas || canvas.width < 16 || canvas.height < 16) {
+    return canvas;
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return canvas;
+  }
+  const w = canvas.width;
+  const h = canvas.height;
+  const { data } = ctx.getImageData(0, 0, w, h);
+  const bg = [0xf8, 0xfa, 0xfc];
+  const tol = 14;
+  const isBg = (x, y) => {
+    const i = (y * w + x) * 4;
+    return Math.abs(data[i] - bg[0]) <= tol &&
+      Math.abs(data[i + 1] - bg[1]) <= tol &&
+      Math.abs(data[i + 2] - bg[2]) <= tol;
+  };
+  let top = 0;
+  let bottom = h - 1;
+  let left = 0;
+  let right = w - 1;
+  while (top < bottom) {
+    let empty = true;
+    for (let x = 0; x < w; x++) {
+      if (!isBg(x, top)) {
+        empty = false;
+        break;
+      }
+    }
+    if (!empty) {
+      break;
+    }
+    top += 1;
+  }
+  while (bottom > top) {
+    let empty = true;
+    for (let x = 0; x < w; x++) {
+      if (!isBg(x, bottom)) {
+        empty = false;
+        break;
+      }
+    }
+    if (!empty) {
+      break;
+    }
+    bottom -= 1;
+  }
+  while (left < right) {
+    let empty = true;
+    for (let y = top; y <= bottom; y++) {
+      if (!isBg(left, y)) {
+        empty = false;
+        break;
+      }
+    }
+    if (!empty) {
+      break;
+    }
+    left += 1;
+  }
+  while (right > left) {
+    let empty = true;
+    for (let y = top; y <= bottom; y++) {
+      if (!isBg(right, y)) {
+        empty = false;
+        break;
+      }
+    }
+    if (!empty) {
+      break;
+    }
+    right -= 1;
+  }
+  const pad = 8;
+  top = Math.max(0, top - pad);
+  left = Math.max(0, left - pad);
+  bottom = Math.min(h - 1, bottom + pad);
+  right = Math.min(w - 1, right + pad);
+  const cw = right - left + 1;
+  const ch = bottom - top + 1;
+  if (cw < 40 || ch < 40 || (cw >= w - 2 && ch >= h - 2)) {
+    return canvas;
+  }
+  const out = document.createElement("canvas");
+  out.width = cw;
+  out.height = ch;
+  out.getContext("2d").drawImage(canvas, left, top, cw, ch, 0, 0, cw, ch);
+  return out;
+}
+
 /** Temporarily expand scroll/overflow clips so html2canvas can see full live view. */
 function prepareFlowHostForCapture(host) {
   const restore = [];
@@ -6249,17 +6522,19 @@ async function captureLiveViewCanvas() {
   if (typeof html2canvas !== "function") throw new Error("截图库未加载");
   const livePanel = document.getElementById("tabLive");
   const wasHidden = !!livePanel?.classList.contains("hidden");
-  if (wasHidden && livePanel) livePanel.classList.remove("hidden");
-
-  const undoExpand = prepareFlowHostForCapture(el);
+  if (livePanel) livePanel.classList.remove("hidden");
+  document.body.classList.add("capturing-live");
+  void livePanel?.offsetHeight;
+  let undoExpand = () => {};
   const wrap = el.querySelector(".flow-svg-wrap");
   const prevScrollLeft = wrap?.scrollLeft || 0;
   const prevScrollTop = wrap?.scrollTop || 0;
-  if (wrap) {
-    wrap.scrollLeft = 0;
-    wrap.scrollTop = 0;
-  }
   try {
+    undoExpand = prepareFlowHostForCapture(el);
+    if (wrap) {
+      wrap.scrollLeft = 0;
+      wrap.scrollTop = 0;
+    }
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
     const svg = el.querySelector(".flow-svg");
     const rail = el.querySelector(".flow-rail");
@@ -6278,16 +6553,14 @@ async function captureLiveViewCanvas() {
     );
     const fullH = Math.ceil(
       Math.max(
-        el.scrollHeight,
-        el.offsetHeight,
+        el.scrollHeight || 0,
         shell?.scrollHeight || 0,
-        svgH + 180,
-        el.getBoundingClientRect().height
+        svgH + 180
       )
     );
     // Large boards: keep scale=1 to avoid canvas memory limits / blank captures
     const scale = fullW > 2200 ? 1 : Math.min(1.25, window.devicePixelRatio || 1);
-    return await html2canvas(el, {
+    const canvas = await html2canvas(el, {
       backgroundColor: "#f8fafc",
       scale,
       width: fullW,
@@ -6303,7 +6576,17 @@ async function captureLiveViewCanvas() {
       // Cards are hoisted to HTML overlays; FO path not needed
       foreignObjectRendering: false,
       logging: false,
-      onclone: (_doc, cloned) => {
+      onclone: (doc, cloned) => {
+        doc.body?.classList.add("capturing-live");
+        const live = doc.getElementById("tabLive");
+        if (live) {
+          live.classList.remove("hidden");
+          live.style.setProperty("display", "block", "important");
+          live.style.setProperty("position", "static", "important");
+          live.style.setProperty("left", "auto", "important");
+          live.style.setProperty("visibility", "visible", "important");
+          live.style.setProperty("opacity", "1", "important");
+        }
         const root = cloned.id === "flowHost" ? cloned : cloned.querySelector?.("#flowHost") || cloned;
         if (!root || !root.style) return;
         const cSvg = root.querySelector?.(".flow-svg");
@@ -6371,12 +6654,17 @@ async function captureLiveViewCanvas() {
         });
       },
     });
+    if (!canvas || canvas.width < 8 || canvas.height < 8) {
+      throw new Error("截图区域尺寸为空");
+    }
+    return trimCanvasWhitespace(canvas);
   } finally {
     if (wrap) {
       wrap.scrollLeft = prevScrollLeft;
       wrap.scrollTop = prevScrollTop;
     }
     undoExpand();
+    document.body.classList.remove("capturing-live");
     if (wasHidden && livePanel && homeTab !== "live") livePanel.classList.add("hidden");
   }
 }
@@ -6991,12 +7279,30 @@ function openLoginMgr() {
 }
 
 function closeLoginMgr() {
+  if (window.self !== window.top) {
+    try {
+      window.parent.postMessage({ type: "caselib-close-login-mgr" }, window.location.origin);
+    } catch (_) {}
+    return;
+  }
   uiRoute = "home";
   render();
 }
 
 /* ============== 自动回归测试（软下发排列组合 → 跑工况 → 出报告） ============== */
-const _atSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const _atSleep = async (ms) => {
+  const step = 200;
+  let left = Math.max(0, Number(ms) || 0);
+  while (left > 0) {
+    if (atPauseRequested) {
+      return "paused";
+    }
+    const chunk = Math.min(step, left);
+    await new Promise((r) => setTimeout(r, chunk));
+    left -= chunk;
+  }
+  return "ok";
+};
 // [moved → checker/cluster.js] _atClampSoc/_atSoc/_atCat/_atHomeAgg/computeMasterExpect
 
 // 读取自动测试页上可选的「家庭电网购电限值 / 三方光伏」配置
@@ -7009,48 +7315,447 @@ function _atMasterOpts() {
 // [moved → checker/cluster.js] AUTO_TARGETS / buildAutoMatrix
 
 let atRunning = false;
+let atPauseRequested = false;
+let atActiveReportId = null;
 let atShowResults = false; // true 时保留时间轴/报告，不重建矩阵预览
+let atLastReport = null;
+let atReportFrameIndex = 0;
+let atReportOnlyFailures = false;
+let atReportCycleNo = null;
+let atPeekPos = null;
+let atPeekSize = null;
+let atPeekOpen = false;
+let atSelectedUids = null;
+let atSelectedTargets = {}; // uid -> { scenarioKey: boolean }
+let atCasePicks = {}; // combo key -> boolean
+let atCaseFilterId = "";
+let atCaseFilterTarget = "";
+let atReplayOpen = false;
+let atInnerTab = "lib";
+
+const AT_STEPS = [
+  { key: "check", label: "开始前检查" },
+  { key: "before", label: "开始前状态" },
+  { key: "issue", label: "下发参数" },
+  { key: "runtime", label: "运行时态" },
+  { key: "checker", label: "检查结果" },
+  { key: "collect", label: "结果回收" },
+];
 
 function openAutoTest() {
-  uiRoute = "autotest";
   atShowResults = false;
-  render();
+  applyUiShell("auto");
+  setAtInnerTab("run");
 }
 function closeAutoTest() {
   if (atRunning) {
-    toast("测试进行中，请等待完成", "error");
+    toast("测试进行中，请先点「暂停」保存后再离开", "error");
     return;
   }
-  uiRoute = "home";
-  render();
+  applyUiShell("home");
+}
+
+function setAtInnerTab(tab) {
+  atInnerTab = tab === "run" || tab === "report" ? tab : "lib";
+  document.querySelectorAll("#autoInnerTabs .home-tab").forEach((btn) => {
+    const on = btn.getAttribute("data-at-tab") === atInnerTab;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  document.getElementById("atPanelLib")?.classList.toggle("hidden", atInnerTab !== "lib");
+  document.getElementById("atPanelRun")?.classList.toggle("hidden", atInnerTab !== "run");
+  document.getElementById("atPanelReport")?.classList.toggle("hidden", atInnerTab !== "report");
+  if (atInnerTab === "lib") {
+    renderAutoLib();
+  } else if (atInnerTab === "run") {
+    renderAutoRun();
+  } else {
+    renderAutoReport();
+  }
+  _atBindHomeSelects();
+  _atSetRunButtons();
+}
+
+function _atFillHomeSelect(selId) {
+  const sel = document.getElementById(selId);
+  if (!sel) return;
+  const homes = state.homes || [];
+  const cur = state.activeHomeId || "";
+  sel.disabled = atRunning;
+  sel.innerHTML =
+    `<option value="">请选择家庭</option>` +
+    homes.map((home) =>
+      `<option value="${escapeAttr(home.uid)}" ${home.uid === cur ? "selected" : ""}>${escapeHtml(homeDisplayName(home))}${home.homeId ? ` · ${home.homeId}` : ""}</option>`
+    ).join("");
+  sel.onchange = () => {
+    const uid = sel.value;
+    if (uid === (state.activeHomeId || "")) return;
+    if (atRunning) {
+      toast("测试进行中，请先暂停再切换家庭", "error");
+      sel.value = state.activeHomeId || "";
+      return;
+    }
+    const stayReport = atInnerTab === "report";
+    state.activeHomeId = uid || "";
+    persist();
+    atShowResults = false;
+    atSelectedUids = null;
+    atSelectedTargets = {};
+    atCasePicks = {};
+    atCaseFilterId = "";
+    atCaseFilterTarget = "";
+    if (stayReport) {
+      atLastReport = null;
+    }
+    render();
+  };
+}
+
+function _atBindHomeSelects() {
+  _atFillHomeSelect("atHomeSelectRun");
+  _atFillHomeSelect("atHomeSelectReport");
+}
+
+function _atSetRunButtons() {
+  const runBtn = document.getElementById("btnAutoTestRun");
+  const pauseBtn = document.getElementById("btnAutoTestPause");
+  if (runBtn) {
+    runBtn.disabled = atRunning || !activeHome();
+  }
+  if (pauseBtn) {
+    pauseBtn.classList.toggle("hidden", !atRunning);
+    pauseBtn.disabled = !atRunning || atPauseRequested;
+    pauseBtn.textContent = atPauseRequested ? "暂停中…" : "暂停";
+  }
+}
+
+function pauseAutoTest() {
+  if (!atRunning || atPauseRequested) {
+    return;
+  }
+  atPauseRequested = true;
+  _atSetRunButtons();
+  toast("将结束当前用例后暂停，并立刻保存到本地", "ok");
+}
+
+function _atEnsureSelected(home) {
+  const all = (home?.devices || []).map((dev) => dev.uid);
+  if (atSelectedUids == null) {
+    atSelectedUids = [...all];
+    return atSelectedUids;
+  }
+  atSelectedUids = atSelectedUids.filter((uid) => all.includes(uid));
+  return atSelectedUids;
+}
+
+function _atEnsureTargetMap(plan) {
+  const prev = atSelectedTargets[plan.uid] || {};
+  const next = {};
+  for (const scenario of plan.scenarios || []) {
+    if (!scenario.feasible) {
+      continue;
+    }
+    next[scenario.key] = prev[scenario.key] !== false;
+  }
+  atSelectedTargets[plan.uid] = next;
+  return next;
+}
+
+function _atSetAllTargets(home, on) {
+  const plans = typeof buildAutoDevicePlans === "function" ? buildAutoDevicePlans(home) : [];
+  for (const plan of plans) {
+    if (!(atSelectedUids || []).includes(plan.uid)) {
+      continue;
+    }
+    const map = {};
+    for (const scenario of plan.scenarios || []) {
+      if (scenario.feasible) {
+        map[scenario.key] = !!on;
+      }
+    }
+    atSelectedTargets[plan.uid] = map;
+  }
+}
+
+function _atTargetOnCount(plan) {
+  const map = atSelectedTargets[plan.uid] || {};
+  return (plan.scenarios || []).filter((scenario) => scenario.feasible && map[scenario.key] !== false).length;
+}
+
+function _atComboMathTxt(plans, selectedUids) {
+  const parts = [];
+  for (const uid of selectedUids || []) {
+    const plan = (plans || []).find((item) => item.uid === uid);
+    if (!plan) {
+      continue;
+    }
+    parts.push({ name: plan.device, n: _atTargetOnCount(plan) });
+  }
+  if (!parts.length) {
+    return "";
+  }
+  const total = parts.reduce((acc, item) => acc * item.n, 1);
+  return parts.map((item) => `${item.name} ${item.n}`).join(" × ") + ` = ${total} 条`;
+}
+
+function _atCycleKey(cycle) {
+  if (cycle?.key) {
+    return cycle.key;
+  }
+  if (typeof _atComboKey === "function") {
+    return _atComboKey(_atCycleAssignments(cycle));
+  }
+  return String(cycle?.no || "");
+}
+
+function _atEnsureCasePicks(cycles) {
+  const next = {};
+  for (const cycle of cycles || []) {
+    const key = _atCycleKey(cycle);
+    next[key] = atCasePicks[key] !== false;
+  }
+  atCasePicks = next;
+  return next;
+}
+
+function _atPickedCycles(cycles) {
+  if (typeof pickComboCycles === "function") {
+    return pickComboCycles(cycles, atCasePicks);
+  }
+  return (cycles || []).filter((cycle) => atCasePicks[_atCycleKey(cycle)] !== false);
+}
+
+function _atCaseFilterOpts() {
+  return { deviceId: atCaseFilterId, target: atCaseFilterTarget };
+}
+
+function _atRowMatchesFilter(row) {
+  const opts = _atCaseFilterOpts();
+  const parts = String(row.getAttribute("data-parts") || "").split(";;").filter(Boolean);
+  const q = String(opts.deviceId || "").trim().toLowerCase();
+  const target = String(opts.target || "").trim();
+  const pool = parts.filter((part) => {
+    const fields = part.split("|");
+    const uid = fields[0] || "";
+    const deviceId = fields[1] || "";
+    const device = fields[2] || "";
+    if (!q) {
+      return true;
+    }
+    return uid.toLowerCase().includes(q) || deviceId.toLowerCase().includes(q) || device.toLowerCase().includes(q);
+  });
+  if (!pool.length) {
+    return false;
+  }
+  if (!target) {
+    return true;
+  }
+  return pool.some((part) => part.split("|").pop() === target);
+}
+
+function _atApplyCaseFilter() {
+  const idEl = document.getElementById("atCaseFilterId");
+  const tEl = document.getElementById("atCaseFilterTarget");
+  if (idEl) {
+    atCaseFilterId = idEl.value || "";
+  }
+  if (tEl) {
+    atCaseFilterTarget = tEl.value || "";
+  }
+  const rows = document.querySelectorAll(".at-case-row[data-case-key]");
+  rows.forEach((row) => {
+    row.classList.toggle("hidden", !_atRowMatchesFilter(row));
+  });
+  _atRefreshCasePickMeta(rows.length);
+}
+
+function _atRefreshCasePickMeta(total) {
+  const el = document.getElementById("atCasePickMeta");
+  if (!el) {
+    return;
+  }
+  let picked = 0;
+  let shown = 0;
+  document.querySelectorAll(".at-case-row[data-case-key]").forEach((row) => {
+    const on = !!row.querySelector("input[data-case-key]")?.checked;
+    const vis = !row.classList.contains("hidden");
+    if (on) {
+      picked += 1;
+    }
+    if (vis) {
+      shown += 1;
+    }
+    row.classList.toggle("is-off", !on);
+  });
+  el.innerHTML = `显示 ${shown}/${total} · <b>将执行 ${picked}</b>`;
+}
+
+function _atSetVisibleCasePicks(on) {
+  document.querySelectorAll(".at-case-row[data-case-key]").forEach((row) => {
+    if (row.classList.contains("hidden")) {
+      return;
+    }
+    const key = row.getAttribute("data-case-key");
+    const box = row.querySelector("input[data-case-key]");
+    atCasePicks[key] = !!on;
+    if (box) {
+      box.checked = !!on;
+    }
+  });
+  _atRefreshCasePickMeta(document.querySelectorAll(".at-case-row[data-case-key]").length);
+}
+
+function _atSetAllCasePicks(on) {
+  Object.keys(atCasePicks).forEach((key) => {
+    atCasePicks[key] = !!on;
+  });
+  document.querySelectorAll("input[data-case-key]").forEach((box) => {
+    box.checked = !!on;
+  });
+  _atRefreshCasePickMeta(document.querySelectorAll(".at-case-row[data-case-key]").length);
+}
+
+function _atCaseFilterBarHtml() {
+  const catalog = typeof getAutoTargetCatalog === "function" ? getAutoTargetCatalog() : [];
+  const opts = catalog.map((item) =>
+    `<option value="${escapeAttr(item.target)}" ${atCaseFilterTarget === item.target ? "selected" : ""}>${escapeHtml(typeof _atShortTarget === "function" ? _atShortTarget(item.target) : item.target)}</option>`
+  ).join("");
+  return `<div class="at-case-filter">` +
+    `<input id="atCaseFilterId" type="search" placeholder="设备 ID / 名称" value="${escapeAttr(atCaseFilterId)}" />` +
+    `<select id="atCaseFilterTarget"><option value="">全部工况</option>${opts}</select>` +
+    `<button type="button" class="btn btn-ghost btn-xs" id="atCasePickShown">勾选筛选结果</button>` +
+    `<button type="button" class="btn btn-ghost btn-xs" id="atCaseUnpickShown">取消筛选结果</button>` +
+    `<button type="button" class="btn btn-ghost btn-xs" id="atCasePickAll">用例全选</button>` +
+    `<button type="button" class="btn btn-ghost btn-xs" id="atCasePickNone">用例清空</button>` +
+  `</div>`;
+}
+
+function _atCaseRowHtml(cycle) {
+  const key = _atCycleKey(cycle);
+  const on = atCasePicks[key] !== false;
+  const assigns = _atCycleAssignments(cycle);
+  const parts = assigns.map((item) => [item.uid || "", item.deviceId || "", item.device || "", item.target || ""].join("|")).join(";;");
+  const ids = assigns.map((item) => item.deviceId || item.uid || "—").join(" / ");
+  const label = assigns.length
+    ? `<span class="at-case-assigns">${assigns.map((item) =>
+      `<span class="at-case-assign">${escapeHtml(item.device || "—")} ${_atModelChipHtml(item.target)}</span>`
+    ).join("")}</span>`
+    : `<span class="at-case-label">${escapeHtml(cycle.label || "—")}</span>`;
+  return `<label class="at-case-row ${on ? "" : "is-off"}" data-case-no="${cycle.no}" data-case-key="${escapeAttr(key)}" data-parts="${escapeAttr(parts)}">` +
+    `<input type="checkbox" data-case-key="${escapeAttr(key)}" ${on ? "checked" : ""} />` +
+    `<span class="at-case-no">${cycle.no}</span>` +
+    `<span class="at-case-main">${label}` +
+      `<span class="at-case-ids">${escapeHtml(ids)}</span></span>` +
+    `<span class="at-case-status at-case-ready">就绪</span>` +
+  `</label>`;
+}
+
+function _atBindCasePicker(total) {
+  document.getElementById("atCaseFilterId")?.addEventListener("input", () => _atApplyCaseFilter());
+  document.getElementById("atCaseFilterTarget")?.addEventListener("change", () => _atApplyCaseFilter());
+  document.getElementById("atCasePickShown")?.addEventListener("click", () => _atSetVisibleCasePicks(true));
+  document.getElementById("atCaseUnpickShown")?.addEventListener("click", () => _atSetVisibleCasePicks(false));
+  document.getElementById("atCasePickAll")?.addEventListener("click", () => _atSetAllCasePicks(true));
+  document.getElementById("atCasePickNone")?.addEventListener("click", () => _atSetAllCasePicks(false));
+  document.querySelectorAll("input[data-case-key]").forEach((box) => {
+    box.addEventListener("change", () => {
+      atCasePicks[box.getAttribute("data-case-key")] = box.checked;
+      _atRefreshCasePickMeta(total);
+    });
+  });
+  _atApplyCaseFilter();
+}
+
+function _atDeviceScopeHtml(home, selectedUids, devicePlans) {
+  return (home?.devices || []).map((dev) => {
+    const plan = (devicePlans || []).find((item) => item.uid === dev.uid)
+      || (typeof buildAutoDeviceScenarioPlan === "function" ? buildAutoDeviceScenarioPlan(dev, home) : null);
+    if (!plan) {
+      return "";
+    }
+    const checked = selectedUids.includes(dev.uid);
+    const map = _atEnsureTargetMap(plan);
+    const chips = (plan.scenarios || []).map((scenario) => {
+      const short = typeof _atShortTarget === "function" ? _atShortTarget(scenario.target) : scenario.target;
+      const tone = _atModelClass(scenario.target);
+      if (!scenario.feasible) {
+        return `<button type="button" class="at-tchip ${tone} skip" disabled title="${escapeAttr(scenario.note || "当前无法构造")}">${escapeHtml(short)}</button>`;
+      }
+      const on = map[scenario.key] !== false;
+      return `<button type="button" class="at-tchip ${tone} ${on ? "ok" : "off"}" data-at-target-uid="${escapeAttr(dev.uid)}" data-at-target-key="${escapeAttr(scenario.key)}" aria-pressed="${on ? "true" : "false"}" title="${escapeAttr(scenario.target + (on ? "（已选入笛卡尔积）" : "（不参与组合）"))}">${escapeHtml(short)}</button>`;
+    }).join("");
+    const onN = _atTargetOnCount(plan);
+    const feasN = (plan.scenarios || []).filter((scenario) => scenario.feasible).length;
+    return `<div class="at-dev-card ${checked ? "" : "is-off"}">` +
+      `<div class="at-dev-head">` +
+        `<label class="at-dev-name"><input type="checkbox" data-at-uid="${escapeAttr(dev.uid)}" ${checked ? "checked" : ""} /> ${escapeHtml(dev.name || dev.deviceId)}</label>` +
+        `<span class="at-dev-soc">SoC ${plan.soc == null ? "—" : plan.soc + "%"} · ${_atModelChipHtml(plan.currentLabel)}</span>` +
+      `</div>` +
+      `<div class="at-dev-targets"><span class="k">工况</span>${chips}<span class="at-dev-feas">${onN}/${feasN} 已选</span></div>` +
+    `</div>`;
+  }).join("");
+}
+
+function _atCycleAssignments(cycle) {
+  if (Array.isArray(cycle?.assignments) && cycle.assignments.length) {
+    return cycle.assignments;
+  }
+  if (cycle?.uid) {
+    return [{
+      uid: cycle.uid,
+      deviceId: cycle.deviceId,
+      device: cycle.device,
+      target: cycle.target,
+      strategyKey: cycle.strategyKey,
+      coverageKey: cycle.coverageKey,
+      params: { ...(cycle.params || {}) },
+    }];
+  }
+  return [];
+}
+
+function _atCycleDevices(home, cycle) {
+  const uids = new Set(_atCycleAssignments(cycle).map((item) => item.uid));
+  return (home?.devices || []).filter((dev) => uids.has(dev.uid));
+}
+
+function _atCycleLabel(cycle) {
+  return cycle.label || `${cycle.device || "—"} · ${cycle.target || "—"}`;
+}
+
+function _atStepIndex(stepKey) {
+  return AT_STEPS.findIndex((item) => item.key === stepKey);
+}
+
+function _atRenderStepPipeline(cycle) {
+  const cur = _atStepIndex(cycle.step);
+  return AT_STEPS.map((item, idx) => {
+    const cls = idx < cur ? "done" : idx === cur ? "active" : "";
+    return `<span class="at-pipe-step ${cls}">${escapeHtml(item.label)}</span>`;
+  }).join('<span class="at-pipe-arrow">→</span>');
+}
+
+function _atStatusBadge(cycle) {
+  if (cycle.status === "running" || (cycle.step && cycle.step !== "ready" && cycle.step !== "done")) {
+    return `<span class="at-badge at-run">执行中</span>`;
+  }
+  if (cycle.failed || cycle.status === "fail") {
+    return `<span class="at-badge at-fail">失败</span>`;
+  }
+  if (cycle.status === "done") {
+    return `<span class="at-badge at-pass">通过</span>`;
+  }
+  if (cycle.status === "paused") {
+    return `<span class="at-badge at-wait">已暂停</span>`;
+  }
+  return `<span class="at-badge at-wait">就绪</span>`;
 }
 
 function renderAutoTest() {
-  const body = document.getElementById("autoTestBody");
-  if (!body) return;
-  if (atShowResults) return; // 刚跑完/运行中：保留时间轴+报告，不重建矩阵
-  // 未运行时：显示矩阵预览，收起上一轮的时间轴/报告
-  document.getElementById("autoTestTimeline")?.classList.add("hidden");
-  document.getElementById("autoTestProgress")?.classList.add("hidden");
-  document.getElementById("autoTestReport")?.classList.add("hidden");
-  const home = activeHome();
-  const hint = document.getElementById("autoTestHint");
-  if (!home) {
-    if (hint) hint.textContent = "请先在左侧选择一个家庭。";
-    body.innerHTML = "";
-    return;
-  }
-  if (hint) {
-    hint.innerHTML =
-      "只软下发（工作模式 + 备用SOC 相对当前SOC）制造工况。判定分两层：<b>L1 从机判定</b> = 读回态(classifyOwnerWorkModel) 是否命中目标态（测 S1–S13 判定链）；<b>L2 主机决策</b> = 用整簇上报态按分配优先级（充1强充 / 充2抑制 / 一充一放）算出主机期望决策，与 DP98 实际 order+cmdPower 比对（测主机多机分配）。物理量(故障/PV电压/Bypass负载)相关工况需仪器驱动，暂标为软不可达。";
-  }
-  const matrix = buildAutoMatrix(home);
-  const byUid = {};
-  for (const r of matrix) (byUid[r.uid] = byUid[r.uid] || []).push(r);
-  // 按当前读回值算主机期望决策 → 每台的「当前 AC 应充/放方向」
-  const expect = computeMasterExpect(home, _atMasterOpts());
+  setAtInnerTab(atInnerTab || "lib");
+}
 
-  // 家庭整体方向：集群预期充/放合计 + PV/负载/三方
+function _atHomeSummaryHtml(home, expect) {
   let expChg = 0, expDchg = 0, actChg = 0, actDchg = 0;
   for (const dev of home.devices || []) {
     const ex = expect.byUid[dev.uid];
@@ -7060,7 +7765,7 @@ function renderAutoTest() {
   }
   const agg = expect.agg || { pvTotal: 0, loadSum: 0, microSum: 0 };
   const netTxt = expDchg > expChg ? "整体偏放电 / 倾向馈网" : expChg > expDchg ? "整体偏充电 / 倾向取电" : "充放均衡";
-  const summary =
+  return (
     `<div class="at-home-dir">` +
       `<div class="at-home-dir-main">` +
         `<span class="at-dir-title">家庭整体方向</span>` +
@@ -7072,41 +7777,642 @@ function renderAutoTest() {
       `</div>` +
       `<div class="at-home-dir-sub hint">PV总 ${agg.pvTotal}W · bypass负载 ${agg.loadSum}W · 三方光伏 ${expect.tpv}W · 充1需求 ${expect.chg1Need}W · 可放总 ${expect.disCap}W` +
         (actChg || actDchg ? ` ｜ DP98实际：集群充 ${actChg}W · 放 ${actDchg}W` : ` ｜ DP98实际：暂无`) + `</div>` +
-    `</div>`;
+    `</div>`
+  );
+}
 
-  // 每设备一张卡片
-  let cards = "";
-  for (const dev of home.devices || []) {
-    const rows = byUid[dev.uid] || [];
-    const soc = _atSoc(dev);
-    const rep = classifyOwnerWorkModel(dev);
-    const ex = expect.byUid[dev.uid];
-    const a = dev.ownerActual;
-    const actOrder = a ? (a.order === 1 ? "充" : a.order === 2 ? "放" : "待机") : "—";
-    const repTxt = rep ? `${rep.label} · 充${rep.chgCapW}/放${rep.dchgCapW}W` : "—（先「一键读取」）";
-    const feasN = rows.filter((r) => r.feasible).length;
-    const targetChips = rows.map((r) =>
-      `<span class="at-tchip ${r.feasible ? "ok" : "skip"}" title="${escapeHtml(r.note)}${r.params ? " · " + Object.entries(r.params).map(([k, v]) => k + "=" + v).join(" ") : ""}">${escapeHtml(r.target)}${r.feasible ? "" : " ✕"}</span>`
-    ).join("");
-    cards +=
-      `<div class="at-dev-card">` +
-        `<div class="at-dev-head"><span class="at-dev-name">${escapeHtml(dev.name || dev.deviceId)}</span>` +
-          `<span class="at-dev-soc">SoC ${soc == null ? "—" : soc + "%"}</span></div>` +
-        `<div class="at-dev-row"><span class="k">当前上报态</span><span class="v">${escapeHtml(repTxt)}</span></div>` +
-        `<div class="at-dev-row"><span class="k">当前 AC 应</span><span class="v">` +
-          _atDirChip(ex ? ex.order : "—", ex ? ex.powerW : null) +
-          (ex && !ex.determinable ? ` <span class="at-ref" title="${escapeHtml(ex.why)}">参考</span>` : "") +
-          `</span></div>` +
-        `<div class="at-dev-row"><span class="k">DP98 实际</span><span class="v">` +
-          _atDirChip(actOrder, a ? a.cmdPowerW : null) + `</span></div>` +
-        `<div class="at-dev-targets"><span class="k">目标工况</span>${targetChips}<span class="hint at-dev-feas">${feasN}/${rows.length} 可测</span></div>` +
-      `</div>`;
+const AT_LIB_META = {
+  chg1: { tone: "chg1", how: "把备用电量抬到当前之上 10%，机器会当成亏电，进入强充。", delta: 10, mark: "above" },
+  chg2: { tone: "chg2", how: "备用只比当前高 5%，是较弱的强制充电。", delta: 5, mark: "above" },
+  cc: { tone: "cc", how: "备用略低于当前，电量夹在中间，可充也可放。", delta: -1, mark: "below" },
+  canchg: { tone: "canchg", how: "纯 DP 路是备用对齐当前电量；实验室里也能靠调 PV / Bypass / 家庭负载，把放余量压到 ≤0。", delta: 0, mark: "same" },
+  candis: { tone: "candis", how: "要现场把电池最大充拉到 0，页面本身写不出来。", delta: null, mark: "none" },
+  discharge: { tone: "dchg", how: "实验室可调 PV / Bypass / 家庭负载时，可以构造；核心是让 PV−Bypass ≥ 电池最大充，且 batChg>0。", delta: null, mark: "none" },
+  disabled: { tone: "off", how: "核心下发是 AC 输出限=0 + 法规输出限=0；其余像故障、bat 充放都为 0 属于不可直接下发的现场条件。", delta: null, mark: "none" },
+};
+const AT_LIB_DP = {
+  work_mode: {
+    label: "工作模式",
+    fmt: (v) => {
+      const s = String(v ?? "");
+      if (s === "0" || s === "self_powered") return "自用";
+      if (s === "1" || s === "time_of_use") return "分时";
+      return s || "—";
+    },
+  },
+  backup_soc: { label: "备用电量", fmt: (v) => `${v}%` },
+  inverter_input_power_limit: { label: "AC 输入限", fmt: (v) => `${v}W` },
+  output_power_limit: { label: "AC 输出限", fmt: (v) => `${v}W` },
+  regulation_grid_export_p_limit: { label: "法规输出限", fmt: (v) => `${v}W` },
+};
+const AT_LIB_HAL = [
+  { key: "pv_w", label: "目标PV", fmt: (v) => `${v}W` },
+  { key: "bypass_w", label: "目标Bypass", fmt: (v) => `${v}W` },
+  { key: "grid_load_w", label: "目标负载", fmt: (v) => `${v}W` },
+];
+const AT_LIB_LIMITS = [
+  { dp: "inverter_input_power_limit", short: "输入" },
+  { dp: "output_power_limit", short: "输出" },
+  { dp: "regulation_grid_export_p_limit", short: "法规" },
+];
+const AT_LIB_MOCK = {
+  pv: 0,
+  soc: 55,
+  bypass: 0,
+  batChg: 1500,
+  batDchg: 1500,
+  gridLim: 300,
+  outLim: 500,
+  regLim: 500,
+};
+
+function _atLibParseSoc(recipe, meta) {
+  const text = String(recipe?.example || "");
+  const m = text.match(/SoC\s*=\s*(\d+)/i);
+  if (m) return Number(m[1]);
+  const backup = Number(recipe?.params?.backup_soc);
+  if (Number.isFinite(backup) && meta?.delta != null) {
+    return _atClampSoc ? _atClampSoc(backup - meta.delta) : backup - meta.delta;
   }
-  const feasAll = matrix.filter((r) => r.feasible).length;
+  if (meta?.mark === "full") return 100;
+  return 65;
+}
+
+function _atLibCoreTitle(recipe) {
+  if (recipe?.coverageKey === "limit_zero") {
+    return "核心下发 · 输出限=0 + 法规输出限=0";
+  }
+  if (recipe?.coverageKey === "hal_discharge") {
+    return "实验室构造 · 放电";
+  }
+  if (recipe?.coverageKey === "hal_chg1_bypass") {
+    return "实验室构造 · Bypass过大";
+  }
+  if (recipe?.coverageKey === "natural") {
+    return "这条路";
+  }
+  return recipe && Object.keys(recipe.params || {}).length ? "核心下发" : "可写 DP";
+}
+
+function _atLibHalChips(recipe) {
+  const hal = recipe?.hal || {};
+  const steps = Array.isArray(hal.steps) ? hal.steps : [];
+  const chips = AT_LIB_HAL
+    .map((item) => {
+      const raw = hal[item.key];
+      if (raw == null || raw === "") {
+        return "";
+      }
+      return `<span class="at-lib-chip is-hal"><i>${escapeHtml(item.label)}</i><b>${escapeHtml(String(raw))}</b></span>`;
+    })
+    .filter(Boolean)
+    .join("");
+  const stepChips = steps.map((line) => `<span class="at-lib-chip is-hal">${escapeHtml(line)}</span>`).join("");
+  return chips + stepChips || `<span class="at-lib-chip is-hal">${escapeHtml(recipe?.note || "现场调节 PV/Bypass/负载")}</span>`;
+}
+
+function _atLibIssueHtml(writable, core, coreParams, noWritableCore) {
+  const alts = (writable || []).filter((r) => r.coverageKey === "limit_zero");
+  if (alts.length) {
+    return alts.map((r) =>
+      `<div class="at-lib-issue">` +
+        `<span class="at-lib-field-k">${escapeHtml(_atLibCoreTitle(r))}</span>` +
+        `<div class="at-lib-chips">${r.labOnly ? `${_atLibParamChips(r.params || {})}${_atLibHalChips(r)}` : _atLibParamChips(r.params || {})}</div>` +
+      `</div>`
+    ).join("");
+  }
+  return (
+    `<div class="at-lib-issue">` +
+      `<span class="at-lib-field-k">${escapeHtml(_atLibCoreTitle(core))}</span>` +
+      `<div class="at-lib-chips">${
+        noWritableCore && core?.coverageKey !== "natural"
+          ? `<span class="at-lib-chip is-skip">构造不了，靠故障或现场条件</span>`
+          : (core?.labOnly
+              ? `${_atLibParamChips(coreParams || core?.params || {})}${_atLibHalChips(core)}`
+              : _atLibParamChips(coreParams || core?.params || {}))
+      }</div>` +
+    `</div>`
+  );
+}
+
+function _atLibExtraRoutesHtml(writable, core) {
+  const extras = (writable || []).filter((r) => r.labOnly && r.key !== core?.key);
+  if (!extras.length) {
+    return "";
+  }
+  return extras.map((r) =>
+    `<div class="at-lib-issue">` +
+      `<span class="at-lib-field-k">${escapeHtml(_atLibCoreTitle(r))}</span>` +
+      `<div class="at-lib-chips">${_atLibParamChips(r.params || {})}${_atLibHalChips(r)}</div>` +
+    `</div>`
+  ).join("");
+}
+
+function _atLibParamChips(params) {
+  const entries = Object.entries(params || {});
+  if (!entries.length) {
+    return `<span class="at-lib-chip is-skip">不用下发</span>`;
+  }
+  return entries.map(([dp, raw]) => {
+    const meta = AT_LIB_DP[dp] || { label: dp, fmt: String };
+    return `<span class="at-lib-chip"><i>${escapeHtml(meta.label)}</i><b>${escapeHtml(meta.fmt(raw))}</b></span>`;
+  }).join("");
+}
+
+function _atLibMockCurrent() {
+  return { ...AT_LIB_MOCK };
+}
+
+function _atLibCurrentHtml() {
+  const inp = _atLibMockCurrent();
+  const chips = [
+    ["PV", `${Number(inp.pv || 0)}W`],
+    ["当前SoC", `${Number(inp.soc || 0)}%`],
+    ["Bypass", `${Number(inp.bypass || 0)}W`],
+    ["电池最大充", `${Number(inp.batChg || 0)}W`],
+    ["电池最大放", `${Number(inp.batDchg || 0)}W`],
+    ["AC输入限制", `${Number(inp.gridLim || 0)}W`],
+    ["AC输出限制", `${Number(inp.outLim || 0)}W`],
+    ["法规输出限制", `${Number(inp.regLim || 0)}W`],
+  ];
+  return (
+    `<div class="at-lib-field">` +
+      `<span class="at-lib-field-k">1. 当前值（Mock）</span>` +
+      `<div class="at-lib-chips">` +
+        chips.map(([k, v]) => `<span class="at-lib-chip is-hal"><i>${escapeHtml(k)}</i><b>${escapeHtml(String(v))}</b></span>`).join("") +
+      `</div>` +
+    `</div>`
+  );
+}
+
+function _atLibFormulaHtml(item) {
+  const lines = [item?.rule || ""];
+  if (item?.also) {
+    lines.push(item.also);
+  }
+  return (
+    `<div class="at-lib-field">` +
+      `<span class="at-lib-field-k">2. 判定公式</span>` +
+      `<div class="at-lib-formula">` +
+        lines.filter(Boolean).map((line) => `<div>${escapeHtml(line)}</div>`).join("") +
+      `</div>` +
+    `</div>`
+  );
+}
+
+function _atLibPointClass(key) {
+  if (key === "work_mode") return "is-mode";
+  if (key === "backup_soc") return "is-soc";
+  if (key === "inverter_input_power_limit") return "is-input";
+  if (key === "output_power_limit" || key === "regulation_grid_export_p_limit") return "is-output";
+  if (key === "pv_w") return "is-pv";
+  if (key === "bypass_w" || key === "grid_load_w") return "is-load";
+  return "is-generic";
+}
+
+function _atLibPointHtml(key, label, text) {
+  return `<span class="at-lib-point ${_atLibPointClass(key)}"><i>${escapeHtml(label)}</i><b>${escapeHtml(text)}</b></span>`;
+}
+
+function _atLibRecipePointHtml(recipe) {
+  const parts = [];
+  for (const [dp, raw] of Object.entries(recipe?.params || {})) {
+    const meta = AT_LIB_DP[dp] || { label: dp, fmt: String };
+    parts.push(_atLibPointHtml(dp, meta.label, meta.fmt(raw)));
+  }
+  const hal = recipe?.hal || {};
+  for (const item of AT_LIB_HAL) {
+    const raw = hal[item.key];
+    if (raw == null || raw === "") continue;
+    parts.push(_atLibPointHtml(item.key, item.label, item.fmt(raw)));
+  }
+  return parts.join("") || `<span class="at-lib-point is-generic"><i>无需下发</i><b>天然命中</b></span>`;
+}
+
+function _atLibComboFlowHtml(recipe) {
+  const title = _atLibCoreTitle(recipe);
+  return (
+    `<div class="at-lib-route-flow">` +
+      `<span>当前值</span><i></i><span class="is-core">${escapeHtml(title)}</span><i></i><span>命中工况</span>` +
+    `</div>`
+  );
+}
+
+function _atLibComboNoteHtml(recipe) {
+  const note = String(recipe?.note || "").trim();
+  if (!note) {
+    return "";
+  }
+  if (!recipe?.labOnly && recipe?.coverageKey !== "limit_zero") {
+    return "";
+  }
+  const brief = note.replace(/；/g, "； ").slice(0, 120);
+  return `<div class="at-lib-combo-note">${escapeHtml(brief)}${note.length > 120 ? "..." : ""}</div>`;
+}
+
+function _atLibComboCardHtml(recipe, idx) {
+  return (
+    `<div class="at-lib-combo-card ${recipe?.feasible ? "is-ok" : "is-off"}">` +
+      `<div class="at-lib-combo-head"><span>路径 ${idx + 1}</span><b>${escapeHtml(_atLibCoreTitle(recipe))}</b></div>` +
+      _atLibComboFlowHtml(recipe) +
+      `<div class="at-lib-points">${_atLibRecipePointHtml(recipe)}</div>` +
+      _atLibComboNoteHtml(recipe) +
+    `</div>`
+  );
+}
+
+function _atLibComboSummaryText(recipe) {
+  if (!recipe) {
+    return "";
+  }
+  if (recipe.labOnly) {
+    return _atLibCoreTitle(recipe);
+  }
+  return _atLibOverlayName(recipe.params || {});
+}
+
+function _atLibComboGroupKey(recipe) {
+  if (!recipe) {
+    return "";
+  }
+  if (recipe.labOnly) {
+    return recipe.coverageKey || recipe.key || "lab";
+  }
+  const params = recipe.params || {};
+  if (params.backup_soc != null) {
+    return "backup_soc";
+  }
+  if (params.work_mode != null && Object.keys(params).length === 1) {
+    return "work_mode_only";
+  }
+  if (recipe.coverageKey === "limit_zero") {
+    return "limit_zero";
+  }
+  return recipe.coverageKey || recipe.key || "dp";
+}
+
+function _atLibExtraComboHtml(writable, primary) {
+  const extras = (writable || []).filter((recipe) => recipe && recipe.key !== primary?.key);
+  if (!extras.length) {
+    return "";
+  }
+  const primaryGroup = _atLibComboGroupKey(primary);
+  const alt = extras.find((recipe) => _atLibComboGroupKey(recipe) !== primaryGroup) || null;
+  const sameGroupN = extras.filter((recipe) => _atLibComboGroupKey(recipe) === primaryGroup).length;
+  const moreN = extras.length - sameGroupN - (alt ? 1 : 0);
+  if (!alt) {
+    return sameGroupN > 0
+      ? `<div class="at-lib-combo-note">其余 ${sameGroupN} 组属于同类下发路径，已合并不重复展示。</div>`
+      : "";
+  }
+  return (
+    `<div class="at-lib-field">` +
+      `<span class="at-lib-field-k">其余可达路径（示例）</span>` +
+      `<div class="at-lib-combos">${_atLibComboCardHtml(alt, 0)}</div>` +
+      `<div class="at-lib-combo-note">同类路径已合并；其余同类 ${sameGroupN} 组不重复展示${moreN > 0 ? `，另外还有 ${moreN} 组其它路径未展开` : ""}。</div>` +
+    `</div>`
+  );
+}
+
+function _atLibCombosHtml(writable, primary) {
+  const row = primary ? _atLibComboCardHtml(primary, 0) : "";
+  return (
+    `<div class="at-lib-field">` +
+      `<span class="at-lib-field-k">3. 下发组合</span>` +
+      `<div class="at-lib-combos">${row || `<div class="at-lib-combo-note">暂无可达路径</div>`}</div>` +
+      _atLibExtraComboHtml(writable, primary) +
+    `</div>`
+  );
+}
+
+function _atLibCurrentDeprecated(item) {
+  const cur = item?.current;
+  const inp = cur?.inputs;
+  if (!inp) {
+    return "";
+  }
+  const chips = [
+    ["当前设备", cur.device || "—"],
+    ["当前工况", cur.label || "—"],
+    ["PV", `${Number(inp.pv || 0)}W`],
+    ["Bypass", `${Number(inp.bypass || 0)}W`],
+    ["电池最大充", `${Number(inp.batChg || 0)}W`],
+    ["电池最大放", `${Number(inp.batDchg || 0)}W`],
+  ];
+  if (Number.isFinite(inp.gridLim)) {
+    chips.push(["AC输入限", `${Number(inp.gridLim)}W`]);
+  }
+  if (Number.isFinite(inp.outLim)) {
+    chips.push(["AC输出限", `${Number(inp.outLim)}W`]);
+  }
+  return (
+    `<div class="at-lib-field">` +
+      `<span class="at-lib-field-k">当前值</span>` +
+      `<div class="at-lib-chips">` +
+        chips.map(([k, v]) => `<span class="at-lib-chip is-hal"><i>${escapeHtml(k)}</i><b>${escapeHtml(String(v))}</b></span>`).join("") +
+      `</div>` +
+    `</div>`
+  );
+}
+
+function _atLibSocTrack(item, recipe) {
+  const meta = AT_LIB_META[item.key] || {};
+  if (meta.mark === "none") {
+    return (
+      `<div class="at-lib-field">` +
+        `<span class="at-lib-field-k">MCU 判定</span>` +
+        `<div class="at-lib-soc-caption">${escapeHtml(item.rule)}</div>` +
+      `</div>`
+    );
+  }
+  const soc = _atLibParseSoc(recipe, meta);
+  const backup = Number(recipe?.params?.backup_soc);
+  const backupPct = Number.isFinite(backup) ? backup : (meta.delta != null ? soc + meta.delta : (meta.mark === "full" ? 100 : soc));
+  const nowStyle = `left:${Math.max(0, Math.min(100, soc))}%`;
+  const bakStyle = `left:${Math.max(0, Math.min(100, backupPct))}%`;
+  const same = Math.abs(backupPct - soc) < 0.5;
+  return (
+    `<div class="at-lib-soc">` +
+      `<div class="at-lib-soc-scale"><span>0%</span><span>电量</span><span>100%</span></div>` +
+      `<div class="at-lib-soc-track">` +
+        `<div class="at-lib-soc-fill" style="width:${Math.max(0, Math.min(100, soc))}%"></div>` +
+        `<div class="at-lib-soc-mark is-now" style="${nowStyle}"><em>当前 ${soc}%</em></div>` +
+        (same || meta.mark === "full"
+          ? ""
+          : `<div class="at-lib-soc-mark is-backup" style="${bakStyle}"><em>备用 ${backupPct}%</em></div>`) +
+      `</div>` +
+      `<div class="at-lib-soc-caption">${escapeHtml(item.rule)}</div>` +
+    `</div>`
+  );
+}
+
+function _atLibOverlayName(params) {
+  const on = AT_LIB_LIMITS.filter((item) => params && params[item.dp] != null);
+  return on.length ? `再叠 ${on.map((item) => item.short).join(" + ")}` : "只改备用";
+}
+
+function _atLibOverlayTile(recipe, live) {
+  const onSet = new Set(Object.keys(recipe.params || {}));
+  const dots = AT_LIB_LIMITS.map((item) => {
+    const on = onSet.has(item.dp);
+    const val = recipe.params?.[item.dp];
+    return `<span class="at-lib-dot ${on ? "on" : ""}" title="${escapeAttr(item.short)}${on && val != null ? ` ${val}W` : ""}">${escapeHtml(item.short)}${on && val != null ? ` ${val}` : ""}</span>`;
+  }).join("");
+  const ok = recipe.feasible;
+  return (
+    `<div class="at-lib-overlay ${ok ? "is-ok" : "is-off"}">` +
+      `<div class="at-lib-overlay-top">` +
+        `<span>${escapeHtml(_atLibOverlayName(recipe.params))}</span>` +
+        (live
+          ? `<span class="at-lib-mini ${ok ? "ok" : ""}">${recipe.feasibleN}/${recipe.deviceN}</span>`
+          : "") +
+      `</div>` +
+      `<div class="at-lib-dots">${dots}</div>` +
+    `</div>`
+  );
+}
+
+function renderAutoLib() {
+  const body = document.getElementById("autoTestLibBody");
+  if (!body) return;
+  const hint = document.getElementById("autoTestHintLib");
+  if (hint) hint.classList.add("hidden");
+  const home = activeHome();
+  const demoHome = {
+    devices: [{ uid: "_demo", name: "示例机", deviceId: "demo", values: { current_soc: 65, work_mode: "0", backup_soc: 20 } }],
+  };
+  const live = !!home;
+  const selectedUids = home ? _atEnsureSelected(home) : ["_demo"];
+  const lib = typeof buildConstructLibrary === "function"
+    ? buildConstructLibrary(home || demoHome, selectedUids)
+    : { items: [], dps: [] };
+  const map = (lib.items || []).map((item) => {
+    const meta = AT_LIB_META[item.key] || { tone: "cc" };
+    const writable = (item.recipes || []).filter((r) => r.coverageKey !== "readonly_gap");
+    const ok = live ? item.writableN > 0 : writable.length > 0 && writable.some((r) => r.coverageKey !== "readonly_gap");
+    return `<button type="button" class="at-lib-map-item ${_atModelClass(item.target)} ${ok ? "" : "is-muted"}" data-lib-jump="${escapeAttr(item.key)}">` +
+      `<b>${escapeHtml(item.short || item.target)}</b>` +
+      `<span>${live ? `${item.writableN}/${writable.length || 0}` : "示意"}</span>` +
+    `</button>`;
+  }).join("");
+  const cards = (lib.items || []).map((item) => {
+    const meta = AT_LIB_META[item.key] || { tone: "cc", how: item.rule };
+    const recipes = item.recipes || [];
+    const writable = recipes.filter((r) => r.coverageKey !== "readonly_gap");
+    const blocked = recipes.filter((r) => r.coverageKey === "readonly_gap");
+    const core = writable.find((r) => !r.labOnly) || writable[0] || null;
+    const reach = live
+      ? (core
+          ? `<span class="at-lib-reach ${core.feasible ? "ok" : ""}">${core.feasibleN}/${core.deviceN} 台能走到</span>`
+          : `<span class="at-lib-reach">无可写下发</span>`)
+      : (core
+          ? (item.key === "disabled"
+              ? `<span class="at-lib-reach">输出限=0 + 法规输出限=0</span>`
+              : `<span class="at-lib-reach">SoC=65% 示意</span>`)
+          : `<span class="at-lib-reach">无可写下发</span>`);
+    const blockedLine = blocked.length
+      ? `<div class="at-lib-gaps">${blocked.map((r) => `<span>${escapeHtml(r.note)}</span>`).join("")}</div>`
+      : "";
+    return (
+      `<article class="at-lib-card ${_atModelClass(item.target)}" id="at-lib-${escapeAttr(item.key)}">` +
+        `<header class="at-lib-card-head">` +
+          `<div><h3>${_atModelChipHtml(item.target)}</h3><p>${escapeHtml(meta.how)}</p></div>` +
+          reach +
+        `</header>` +
+        _atLibCurrentHtml(item) +
+        _atLibFormulaHtml(item) +
+        _atLibCombosHtml(writable, core) +
+        blockedLine +
+      `</article>`
+    );
+  }).join("");
   body.innerHTML =
-    summary +
-    `<p class="hint">共 ${matrix.length} 组，其中 <b>${feasAll}</b> 组可测（软可达）。点「开始自动测试」按周期逐组下发并判定。</p>` +
-    `<div class="at-dev-cards">${cards}</div>`;
+    `<div class="at-lib-wrap">` +
+      `<nav class="at-lib-map" id="atLibMap">${map}</nav>` +
+      `<div class="at-lib-hero">` +
+        `<div class="at-lib-flow">` +
+          `<span>读当前电量</span><i></i><span class="is-core">改 DP 或调现场</span><i></i><span>命中判定</span><i></i><span>目标工况</span>` +
+        `</div>` +
+        (live ? "" : `<p class="at-lib-demo">还没选家庭，下面用 65% 电量做示意。到「运行」里选家庭后会换成实机数字。</p>`) +
+      `</div>` +
+      `<div class="at-lib-grid">${cards}</div>` +
+    `</div>`;
+  body.querySelectorAll("[data-lib-jump]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.getElementById(`at-lib-${btn.getAttribute("data-lib-jump")}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+}
+
+function renderAutoRun() {
+  const body = document.getElementById("autoTestBody");
+  if (!body) return;
+  if (atRunning || atShowResults) {
+    _atSetRunButtons();
+    return;
+  }
+  document.getElementById("autoTestTimeline")?.classList.add("hidden");
+  document.getElementById("autoTestProgress")?.classList.add("hidden");
+  const home = activeHome();
+  const hint = document.getElementById("autoTestHint");
+  if (!home) {
+    if (hint) hint.textContent = "请先选择家庭，再勾选设备并开始自动测试。";
+    body.innerHTML = "";
+    return;
+  }
+  const selectedUids = _atEnsureSelected(home);
+  if (hint) {
+    hint.innerHTML =
+      "组合用例是各设备<strong>已选工况徽章</strong>的笛卡尔积。可用设备 ID、工况筛选后，再勾选要执行的那几条。启动后按 <b>开始前状态 → 下发参数 → 运行时态 → 检查结果 → 结果回收</b> 执行。失败高亮但不中断。";
+  }
+  const allPlans = typeof buildAutoDevicePlans === "function" ? buildAutoDevicePlans(home) : [];
+  for (const plan of allPlans) {
+    _atEnsureTargetMap(plan);
+  }
+  const execPlan = buildAutoExecutionPlan(home, selectedUids, atSelectedTargets);
+  _atEnsureCasePicks(execPlan.cycles || []);
+  const pickedN = _atPickedCycles(execPlan.cycles || []).length;
+  const expect = computeMasterExpect(home, _atMasterOpts());
+  const summary = _atHomeSummaryHtml(home, expect);
+  const comboMath = _atComboMathTxt(allPlans, selectedUids);
+  const scopeSection =
+    `<div class="at-scope-card">` +
+      `<div class="at-scope-head"><span class="at-scope-title">设备与工况</span>` +
+        `<span class="at-scope-actions"><button type="button" class="btn btn-ghost btn-xs" id="atSelectAll">设备全选</button>` +
+        `<button type="button" class="btn btn-ghost btn-xs" id="atSelectNone">设备清空</button>` +
+        `<button type="button" class="btn btn-ghost btn-xs" id="atTargetAll">工况全选</button>` +
+        `<button type="button" class="btn btn-ghost btn-xs" id="atTargetNone">工况清空</button></span></div>` +
+      `<p class="hint">勾选设备后，再点工况徽章决定这台机参与哪些态。划掉的是当前构造不了的工况。</p>` +
+      `<div class="at-dev-cards">${_atDeviceScopeHtml(home, selectedUids, allPlans) || `<span class="hint">当前家庭暂无设备</span>`}</div>` +
+    `</div>`;
+  const caseRows = (execPlan.cycles || []).map((cycle) => _atCaseRowHtml(cycle)).join("");
+  const totalCycleN = Number.isFinite(execPlan.totalCycles) ? execPlan.totalCycles : (execPlan.cycles || []).length;
+  const caseMeta = execPlan.truncated
+    ? `当前仅渲染前 <b>${(execPlan.cycles || []).length}</b> / ${totalCycleN} 条（组合过大，已截断）`
+    : `将执行 <b>${pickedN}</b> / ${(execPlan.cycles || []).length}`;
+  const caseSection =
+    `<div class="at-case-card">` +
+      `<div class="at-scope-head"><span class="at-scope-title">组合用例</span>` +
+        `<span class="hint" id="atCasePickMeta">${comboMath ? escapeHtml(comboMath) + " · " : ""}${caseMeta}</span></div>` +
+      (execPlan.incomplete
+        ? `<p class="hint at-warn">有设备没勾任何可构造工况，笛卡尔积为空。请点徽章选入工况，或先读取状态。</p>`
+        : execPlan.truncated
+          ? `<p class="hint at-warn">当前设备/工况组合数为 ${totalCycleN}，运行页只展示前 ${(execPlan.cycles || []).length} 条，避免页面卡死。建议减少勾选设备或工况后再跑。</p>` + _atCaseFilterBarHtml() + `<div class="at-case-list">${caseRows || `<div class="hint">暂无可执行组合用例</div>`}</div>`
+        : _atCaseFilterBarHtml() + `<div class="at-case-list">${caseRows || `<div class="hint">暂无可执行组合用例</div>`}</div>`) +
+    `</div>`;
+  body.innerHTML = summary + scopeSection + caseSection;
+  body.querySelectorAll("[data-at-uid]").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      const uid = cb.getAttribute("data-at-uid");
+      if (!uid) return;
+      if (cb.checked) {
+        if (!atSelectedUids.includes(uid)) atSelectedUids.push(uid);
+      } else {
+        atSelectedUids = atSelectedUids.filter((item) => item !== uid);
+      }
+      renderAutoRun();
+    });
+  });
+  body.querySelectorAll("[data-at-target-key]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const uid = btn.getAttribute("data-at-target-uid");
+      const key = btn.getAttribute("data-at-target-key");
+      if (!uid || !key) return;
+      if (!atSelectedUids.includes(uid)) {
+        atSelectedUids.push(uid);
+      }
+      const map = atSelectedTargets[uid] || {};
+      map[key] = map[key] === false;
+      atSelectedTargets[uid] = map;
+      renderAutoRun();
+    });
+  });
+  body.querySelector("#atSelectAll")?.addEventListener("click", () => {
+    atSelectedUids = (home.devices || []).map((dev) => dev.uid);
+    renderAutoRun();
+  });
+  body.querySelector("#atSelectNone")?.addEventListener("click", () => {
+    atSelectedUids = [];
+    renderAutoRun();
+  });
+  body.querySelector("#atTargetAll")?.addEventListener("click", () => {
+    _atSetAllTargets(home, true);
+    renderAutoRun();
+  });
+  body.querySelector("#atTargetNone")?.addEventListener("click", () => {
+    _atSetAllTargets(home, false);
+    renderAutoRun();
+  });
+  if (!execPlan.incomplete) {
+    _atBindCasePicker((execPlan.cycles || []).length);
+  }
+  _atSetRunButtons();
+  _atBindHomeSelects();
+}
+
+function renderAutoReport() {
+  _atBindHomeSelects();
+  void _atLoadReportPanel();
+}
+
+function _atReportOptionLabel(item) {
+  const when = item.createdAt || item.id || "";
+  const paused = item.status === "paused" ? "暂停" : "完成";
+  const sum = item.summary || item.title || item.id || "";
+  return `${when} · ${paused} · ${sum}`;
+}
+
+function _atSortReports(items) {
+  return [...(items || [])].sort((a, b) => String(b.createdAt || b.id || "").localeCompare(String(a.createdAt || a.id || "")));
+}
+
+async function _atLoadReportPanel() {
+  const reportSel = document.getElementById("atReportSelect");
+  const hint = document.getElementById("atReportPickHint");
+  const rep = document.getElementById("autoTestReport");
+  const home = activeHome();
+  if (!reportSel) {
+    return;
+  }
+  if (!home) {
+    reportSel.disabled = true;
+    reportSel.innerHTML = `<option value="">请先选择家庭</option>`;
+    if (hint) hint.textContent = "请先选择家庭，再看报告。";
+    if (rep) {
+      rep.classList.add("hidden");
+      rep.innerHTML = "";
+    }
+    return;
+  }
+  const items = _atSortReports((await _atFetchReportList()).filter((item) => _atReportBelongsToHome(item, home)));
+  if (!items.length) {
+    reportSel.disabled = true;
+    reportSel.innerHTML = `<option value="">暂无报告</option>`;
+    if (hint) hint.textContent = "该家庭还没有报告。跑测或暂停后会自动保存。";
+    if (rep) {
+      rep.classList.add("hidden");
+      rep.innerHTML = "";
+    }
+    return;
+  }
+  const currentId = atLastReport?.id || atActiveReportId || "";
+  const keep = items.some((item) => item.id === currentId) ? currentId : items[0].id;
+  reportSel.disabled = false;
+  reportSel.innerHTML = items.map((item) =>
+    `<option value="${escapeAttr(item.id)}" ${item.id === keep ? "selected" : ""}>${escapeHtml(_atReportOptionLabel(item))}</option>`
+  ).join("");
+  reportSel.onchange = () => {
+    const id = reportSel.value;
+    if (id && id !== (atLastReport?.id || "")) {
+      void _atLoadReport(id);
+    }
+  };
+  if (hint) hint.textContent = `共 ${items.length} 份，默认最新，可改选。`;
+  if (atLastReport && atLastReport.id === keep) {
+    _atRenderReportPlayer(keep);
+    return;
+  }
+  await _atLoadReport(keep);
 }
 
 // AC 充放方向徽章：充=AC口输入(买电/给电池充)，放=AC口输出(放电)，待机=无
@@ -7136,55 +8442,726 @@ function _nowHMS() {
 }
 const _atParamStr = (params) => Object.entries(params || {}).map(([k, v]) => `${k}=${v}`).join(" ");
 
+function _atStateLabel(actual) {
+  if (!actual) return "—";
+  if (actual.order === 1) return "充";
+  if (actual.order === 2) return "放";
+  return "待机";
+}
+
+function _atSnapshotData(canvas) {
+  return {
+    image: canvasToJpegDataUrl(canvas, SNAPSHOT_MAX_W, 0.76),
+    thumb: canvasToJpegDataUrl(canvas, 360, 0.62),
+  };
+}
+
+function _atFamilyState(home) {
+  return (home?.devices || []).map((dev) => {
+    const owner = classifyOwnerWorkModel(dev);
+    const actual = dev.ownerActual;
+    const v = dev.values || {};
+    const soc = typeof _atSoc === "function" ? _atSoc(dev) : Number(v.current_soc ?? v.main_soc);
+    return {
+      uid: dev.uid,
+      deviceId: dev.deviceId,
+      device: dev.name || dev.deviceId,
+      reportTime: dev.reportTime || null,
+      soc: Number.isFinite(soc) ? soc : null,
+      backup: v.backup_soc != null && v.backup_soc !== "" ? Number(v.backup_soc) : null,
+      workMode: v.work_mode != null ? String(v.work_mode) : "",
+      pv: typeof _ownerPvW === "function" ? _ownerPvW(dev) : 0,
+      bypass: typeof _ownerBypassW === "function" ? _ownerBypassW(dev) : 0,
+      theory: owner ? owner.label : "—",
+      theoryChargeW: owner ? owner.chgCapW : null,
+      theoryDischargeW: owner ? owner.dchgCapW : null,
+      actualLabel: actual ? actual.label : "—",
+      actualOrder: _atStateLabel(actual),
+      actualPowerW: actual ? actual.cmdPowerW : null,
+    };
+  });
+}
+
+function _atFamilyLoadW(home) {
+  const grid = typeof resolveGridNodePower === "function"
+    ? resolveGridNodePower(home)
+    : { watts: null, source: "none" };
+  const meterW = grid.watts != null && Number.isFinite(Number(grid.watts)) ? Number(grid.watts) : null;
+  let sumNegGrid = 0;
+  for (const dev of home?.devices || []) {
+    const v = dev.values || {};
+    const g = Number(v.grid_port_power ?? v.inverter_output_power);
+    if (Number.isFinite(g)) {
+      sumNegGrid += -g;
+    }
+  }
+  if (meterW != null && (grid.source === "meter" || grid.source === "lan")) {
+    return Math.round(meterW - sumNegGrid);
+  }
+  const fv = home?.familyValues || {};
+  const base = Number(fv.base_load);
+  const plug = Number(fv.total_plug_power);
+  const sum = (Number.isFinite(base) ? base : 0) + (Number.isFinite(plug) ? plug : 0);
+  return sum ? Math.round(sum) : null;
+}
+
+function _atHomeFlow(home) {
+  const agg = typeof _atHomeAgg === "function" ? _atHomeAgg(home) : { pvTotal: 0, loadSum: 0, microSum: 0 };
+  let actChg = 0;
+  let actDchg = 0;
+  const bypasses = [];
+  for (const dev of home?.devices || []) {
+    const actual = dev.ownerActual;
+    if (actual) {
+      if (actual.order === 1) {
+        actChg += actual.cmdPowerW || 0;
+      } else if (actual.order === 2) {
+        actDchg += actual.cmdPowerW || 0;
+      }
+    }
+    bypasses.push({
+      uid: dev.uid,
+      device: dev.name || dev.deviceId,
+      w: typeof _ownerBypassW === "function" ? Math.round(_ownerBypassW(dev) || 0) : 0,
+    });
+  }
+  const grid = typeof resolveGridNodePower === "function" ? resolveGridNodePower(home) : { watts: null };
+  return {
+    pvTotal: Math.round(agg.pvTotal || 0),
+    bypass: Math.round(agg.loadSum || 0),
+    micro: Math.round(agg.microSum || 0),
+    actChg: Math.round(actChg),
+    actDchg: Math.round(actDchg),
+    gridW: grid.watts == null || !Number.isFinite(Number(grid.watts)) ? null : Math.round(Number(grid.watts)),
+    familyLoad: _atFamilyLoadW(home),
+    bypasses,
+  };
+}
+
+function _atPhaseLabel(phase) {
+  return ({
+    before: "开始前",
+    issued: "下发",
+    mid: "运行中",
+    observe: "检查",
+    "fail-focus": "失败",
+    restore: "回收",
+  })[phase] || phase;
+}
+
+function _atW(value) {
+  if (value == null || value === "" || !Number.isFinite(Number(value))) {
+    return "—";
+  }
+  return `${Math.round(Number(value))}W`;
+}
+
+function _atParamHuman(params) {
+  return Object.entries(params || {}).map(([key, value]) => {
+    const meta = AT_LIB_DP[key];
+    if (meta) {
+      return `${meta.label}=${meta.fmt(value)}`;
+    }
+    return `${key}=${value}`;
+  }).join("，");
+}
+
+function _atParamFmt(key, value) {
+  const meta = AT_LIB_DP[key];
+  if (meta) {
+    return meta.fmt(value);
+  }
+  return value == null || value === "" ? "—" : String(value);
+}
+
+/**
+ * @brief Show param changes as "label 旧值→新值"
+ * @param[in] params new values
+ * @param[in] from previous values (optional)
+ * @return human text
+ */
+function _atParamChangeHuman(params, from) {
+  const entries = Object.entries(params || {});
+  if (!entries.length) {
+    return "";
+  }
+  return entries.map(([key, value]) => {
+    const meta = AT_LIB_DP[key] || { label: key };
+    const toTxt = _atParamFmt(key, value);
+    const hasFrom = from && Object.prototype.hasOwnProperty.call(from, key);
+    if (!hasFrom) {
+      return `${meta.label}→${toTxt}`;
+    }
+    const fromTxt = _atParamFmt(key, from[key]);
+    if (String(from[key] ?? "") === String(value ?? "")) {
+      return `${meta.label}=${toTxt}`;
+    }
+    return `${meta.label} ${fromTxt}→${toTxt}`;
+  }).join("，");
+}
+
+function _atModelClass(label) {
+  const raw = String(label || "").trim();
+  const map = {
+    "充电状态1": "m33", "充电1": "m33", chg1: "m33", m33: "m33", "0x21": "m33", "33": "m33",
+    "充电状态2": "m1", "充电2": "m1", chg2: "m1", m1: "m1", "0x01": "m1", "1": "m1",
+    "可充可放": "m3", cc: "m3", m3: "m3", "0x03": "m3", "3": "m3",
+    "可充": "m4", canchg: "m4", m4: "m4", "0x04": "m4", "4": "m4",
+    "可放": "m5", candis: "m5", m5: "m5", "0x05": "m5", "5": "m5",
+    "放电": "m2", discharge: "m2", dchg: "m2", m2: "m2", "0x02": "m2", "2": "m2",
+    "禁充禁放": "m6", disabled: "m6", off: "m6", m6: "m6", "0x06": "m6", "6": "m6",
+  };
+  if (map[raw]) {
+    return map[raw];
+  }
+  const short = typeof _atShortTarget === "function" ? _atShortTarget(raw) : raw;
+  return map[short] || "";
+}
+
+function _atModelChipHtml(label, extraClass) {
+  const text = String(label || "").trim();
+  if (!text || text === "—") {
+    return `<span class="owner-chip">${escapeHtml(text || "—")}</span>`;
+  }
+  const shown = typeof _atShortTarget === "function" ? _atShortTarget(text) : text;
+  return `<span class="owner-chip ${_atModelClass(text)}${extraClass ? ` ${extraClass}` : ""}">${escapeHtml(shown)}</span>`;
+}
+
+function _atGridFlowTxt(flow) {
+  if (!flow || flow.gridW == null) {
+    return "电网 —";
+  }
+  if (flow.gridW > 0) {
+    return `电网取电 ${flow.gridW}W`;
+  }
+  if (flow.gridW < 0) {
+    return `电网馈网 ${-flow.gridW}W`;
+  }
+  return "电网 0W";
+}
+
+function _atTermChip(kind, name, value, dir) {
+  const dirHtml = dir ? `<i class="at-term-dir">${escapeHtml(dir)}</i>` : "";
+  const on = value && value !== "—" && value !== "0W";
+  return `<span class="at-term at-term-${kind}${on ? " is-on" : ""}"><b>${escapeHtml(name)}</b>${dirHtml}<em>${escapeHtml(value)}</em></span>`;
+}
+
+function _atGridTermHtml(flow) {
+  if (!flow || flow.gridW == null) {
+    return _atTermChip("grid", "电网", "—");
+  }
+  if (flow.gridW > 0) {
+    return _atTermChip("grid", "电网", `${flow.gridW}W`, "取电");
+  }
+  if (flow.gridW < 0) {
+    return _atTermChip("grid", "电网", `${-flow.gridW}W`, "馈网");
+  }
+  return _atTermChip("grid", "电网", "0W");
+}
+
+function _atBypassTermsHtml(flow, familyState) {
+  let items = [];
+  if (Array.isArray(flow?.bypasses) && flow.bypasses.length) {
+    items = flow.bypasses.map((item) => ({ name: item.device || "—", w: item.w }));
+  } else if ((familyState || []).length) {
+    items = familyState.map((item) => ({ name: item.device || "—", w: item.bypass }));
+  } else if (flow?.bypass != null) {
+    items = [{ name: "合计", w: flow.bypass }];
+  }
+  if (!items.length) {
+    return _atTermChip("bypass", "Bypass", "—");
+  }
+  return items.map((item) => _atTermChip("bypass", item.name, _atW(item.w))).join("");
+}
+
+function _atFlowSchematicHtml(flow, familyState, size) {
+  const pvExtra = flow?.micro ? _atTermChip("pv", "三方", _atW(flow.micro)) : "";
+  return `<div class="at-schematic${size === "lg" ? " is-lg" : ""}" title="左 PV 进 · 上 电网/集群充放 · 右 负载 · 下 Bypass">` +
+    `<div class="at-sch-n">` +
+      _atGridTermHtml(flow) +
+      `<div class="at-sch-cluster">` +
+        _atTermChip("chg", "集群充", _atW(flow?.actChg)) +
+        _atTermChip("dchg", "集群放", _atW(flow?.actDchg)) +
+      `</div>` +
+    `</div>` +
+    `<div class="at-sch-vn" aria-hidden="true"></div>` +
+    `<div class="at-sch-w">${_atTermChip("pv", "PV", _atW(flow?.pvTotal))}${pvExtra}</div>` +
+    `<div class="at-sch-hw" aria-hidden="true"></div>` +
+    `<div class="at-sch-hub">家</div>` +
+    `<div class="at-sch-he" aria-hidden="true"></div>` +
+    `<div class="at-sch-e">${_atTermChip("load", "负载", _atW(flow?.familyLoad))}</div>` +
+    `<div class="at-sch-vs" aria-hidden="true"></div>` +
+    `<div class="at-sch-s">${_atBypassTermsHtml(flow, familyState)}</div>` +
+  `</div>`;
+}
+
+function _atFlowTermsHtml(flow, familyState) {
+  return `<div class="at-flow-terms">` +
+    `<div class="at-flow-row">` +
+      _atTermChip("pv", "PV", _atW(flow?.pvTotal)) +
+      _atGridTermHtml(flow) +
+      _atTermChip("load", "负载", _atW(flow?.familyLoad)) +
+    `</div>` +
+    `<div class="at-flow-row">` +
+      _atTermChip("chg", "集群", _atW(flow?.actChg), "充") +
+      _atTermChip("dchg", "集群", _atW(flow?.actDchg), "放") +
+      (flow?.micro ? _atTermChip("pv", "三方", _atW(flow.micro)) : "") +
+    `</div>` +
+    `<div class="at-flow-row at-flow-bypass"><span class="at-flow-kicker">Bypass</span>${_atBypassTermsHtml(flow, familyState)}</div>` +
+    `</div>`;
+}
+
+function _atVerdictBadgeHtml(verdict) {
+  const kind = verdict?.kind || "paused";
+  const icons = {
+    pass: `<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="currentColor" opacity=".18"/><path d="M6 10.4l2.6 2.6L14.4 7.2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+    fail: `<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="currentColor" opacity=".18"/><path d="M7 7l6 6M13 7l-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>`,
+    paused: `<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="currentColor" opacity=".18"/><path d="M8 6.5h1.6v7H8zm2.4 0H12v7h-1.6z" fill="currentColor"/></svg>`,
+  };
+  const cls = kind === "pass" ? "is-pass" : kind === "fail" ? "is-fail" : "is-pause";
+  const label = kind === "pass" ? "通过" : kind === "fail" ? "失败" : (verdict?.label || "暂停");
+  return `<span class="at-verdict ${cls}">${icons[kind] || icons.paused}<b>${escapeHtml(label)}</b></span>`;
+}
+
+function _atBypassPlain(flow, familyState) {
+  if (Array.isArray(flow?.bypasses) && flow.bypasses.length) {
+    return flow.bypasses.map((item) => `${item.device || "—"} ${_atW(item.w)}`).join(" · ");
+  }
+  const list = familyState || [];
+  if (!list.length) {
+    return flow?.bypass != null ? `合计 ${_atW(flow.bypass)}` : "—";
+  }
+  return list.map((item) => `${item.device || "—"} ${_atW(item.bypass)}`).join(" · ");
+}
+
+function _atHomeFlowHtml(flow, familyState) {
+  if (!flow && !(familyState || []).length) {
+    return "";
+  }
+  return `<div class="at-step-flow">` +
+    `<div class="at-step-kicker">家庭流向</div>` +
+    _atFlowTermsHtml(flow, familyState) +
+    `</div>`;
+}
+
+function _atDeviceStateTable(familyState) {
+  const list = familyState || [];
+  if (!list.length) {
+    return "";
+  }
+  const rows = list.map((item) =>
+    `<tr>` +
+      `<td>${escapeHtml(item.device || "—")}</td>` +
+      `<td class="mono">${item.soc != null ? `${item.soc}%` : "—"}${item.backup != null && Number.isFinite(item.backup) ? `/${item.backup}%` : ""}</td>` +
+      `<td>${_atModelChipHtml(item.theory)}</td>` +
+      `<td class="mono">${escapeHtml(_atFmtCmd(item.actualOrder, item.actualPowerW))}</td>` +
+      `<td class="mono">PV ${_atW(item.pv)} · By ${_atW(item.bypass)}</td>` +
+    `</tr>`
+  ).join("");
+  return `<div class="at-step-kicker">各设备状态</div>` +
+    `<div class="at-step-table-wrap"><table class="at-step-table at-step-table-compact"><thead><tr><th>设备</th><th>SoC/备</th><th>工况</th><th>DP98</th><th>口功率</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function _atIssuedTable(issued) {
+  const list = issued || [];
+  if (!list.length) {
+    return `<div class="at-player-note">本步没有下发记录。</div>`;
+  }
+  const rows = list.map((item) => {
+    const human = _atParamChangeHuman(item.params, item.from) || _atParamHuman(item.params);
+    const ok = item.ok !== false;
+    return `<tr class="${ok ? "" : "is-fail"}">` +
+      `<td>${escapeHtml(item.device || "—")}</td>` +
+      `<td>${_atModelChipHtml(item.target)}</td>` +
+      `<td class="mono at-param-change">${escapeHtml(human || "天然命中，未改参")}</td>` +
+      `<td>${ok
+        ? `<span class="at-badge at-pass">${human ? "已下发" : "未改参"}</span>`
+        : `<span class="at-badge at-fail">下发失败</span>${item.err ? `<div class="at-fail-text">${escapeHtml(item.err)}</div>` : ""}`}</td>` +
+      `</tr>`;
+  }).join("");
+  return `<div class="at-step-table-wrap"><table class="at-step-table at-step-table-compact"><thead><tr><th>设备</th><th>目标</th><th>参数变更</th><th>结果</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function _atFrameOneLiner(frame) {
+  if (frame.phase === "before" && frame.homeFlow) {
+    return `PV ${_atW(frame.homeFlow.pvTotal)} · Bypass ${_atW(frame.homeFlow.bypass)} · ${_atGridFlowTxt(frame.homeFlow)}`;
+  }
+  if (frame.phase === "issued") {
+    const changed = (frame.issued || []).filter((item) => Object.keys(item.params || {}).length).length;
+    const failN = (frame.issued || []).filter((item) => item.ok === false).length;
+    if (failN) {
+      return `${failN} 台下发失败`;
+    }
+    return changed ? `下发 ${changed} 台参数` : "天然命中，未改参";
+  }
+  if (frame.phase === "mid" && frame.homeFlow) {
+    return `PV ${_atW(frame.homeFlow.pvTotal)} · Bypass ${_atW(frame.homeFlow.bypass)}`;
+  }
+  if (frame.phase === "observe" || frame.phase === "fail-focus") {
+    const results = frame.checkerState || [];
+    const failN = results.filter((item) => !item.pass || item.error).length;
+    return failN ? `${failN}/${results.length} 台失败` : `${results.length} 台通过`;
+  }
+  if (frame.phase === "restore") {
+    return "已恢复下发前参数";
+  }
+  return frame.note || "";
+}
+
+function _atCycleDevice(home, cycle) {
+  return _atCycleDevices(home, cycle)[0] || null;
+}
+
+function _atFmtCmd(order, powerW) {
+  if (!order || order === "—") {
+    return powerW == null ? "—" : `—/${powerW}W`;
+  }
+  return `${order}/${powerW == null ? "—" : powerW}W`;
+}
+
+function _atL2DirOk(r) {
+  return r.actOrder === r.expOrder;
+}
+
+function _atL2PowOk(r) {
+  return Array.isArray(r.expBand) && r.actPower != null && r.actPower >= r.expBand[0] && r.actPower <= r.expBand[1];
+}
+
+function _atFailTags(r) {
+  const tags = [];
+  if (r.error) {
+    tags.push("下发失败");
+  }
+  if (!r.hitTarget) {
+    tags.push("工况未中");
+  }
+  if (r.masterPass === false) {
+    if (!_atL2DirOk(r)) {
+      tags.push("方向不符");
+    } else if (!_atL2PowOk(r)) {
+      tags.push("功率越界");
+    } else {
+      tags.push("主机不符");
+    }
+  }
+  return tags;
+}
+
+function _atIsLegacyWhy(text) {
+  return /参考不硬判|能量守恒|强制充电|充2抑制|未被抑制|仅有盈余/.test(String(text || ""));
+}
+
+function _atFailReason(r) {
+  if (r.failReason && !_atIsLegacyWhy(r.failReason)) {
+    return r.failReason;
+  }
+  const lines = [];
+  if (r.error) {
+    lines.push(`下发失败：${r.error}`);
+  }
+  if (!r.hitTarget) {
+    lines.push(`工况未中：目标 ${r.target || "—"}，读回 ${r.theory || "—"}`);
+  }
+  if (r.masterPass === false) {
+    const exp = _atFmtCmd(r.expOrder, r.expPower);
+    const act = _atFmtCmd(r.actOrder, r.actPower);
+    const band = Array.isArray(r.expBand) ? `（容 ${r.expBand[0]}~${r.expBand[1]}）` : "";
+    if (!_atL2DirOk(r)) {
+      lines.push(`方向不符：期望 ${exp}，实际 ${act}`);
+    } else {
+      lines.push(`功率越界：期望 ${exp}${band}，实际 ${act}`);
+    }
+  }
+  return lines.join("；");
+}
+
+function _atFailLines(results) {
+  return (results || [])
+    .filter((item) => !item.pass || !!item.error)
+    .map((item) => `${item.device}：${_atFailReason(item) || "未通过"}`);
+}
+
+function _atSortChecker(results) {
+  return [...(results || [])].sort((a, b) => {
+    const af = (!a.pass || a.error) ? 0 : 1;
+    const bf = (!b.pass || b.error) ? 0 : 1;
+    return af - bf;
+  });
+}
+
+function _atCheckerTableHtml(results) {
+  const list = _atSortChecker(results);
+  if (!list.length) {
+    return "";
+  }
+  const failN = list.filter((item) => !item.pass || item.error).length;
+  const rows = list.map((r) => {
+    const failed = !r.pass || !!r.error;
+    const tags = failed ? (r.failTags || _atFailTags(r)) : [];
+    const reason = failed ? _atFailReason(r) : "";
+    const l1Badge = `<span class="at-badge ${r.hitTarget ? "at-pass" : "at-fail"}">${r.hitTarget ? "命中" : "未中"}</span>`;
+    const l2Badge = r.masterPass === null
+      ? `<span class="at-badge at-skip" title="${escapeHtml(r.masterNote || "参考不硬判")}">参考</span>`
+      : `<span class="at-badge ${r.masterPass ? "at-pass" : "at-fail"}">${r.masterPass ? "通过" : "失败"}</span>`;
+    const tagHtml = failed
+      ? (tags.length ? tags.map((tag) => `<span class="at-badge at-fail">${escapeHtml(tag)}</span>`).join("") : `<span class="at-badge at-fail">失败</span>`)
+      : `<span class="at-badge at-pass">通过</span>`;
+    const params = typeof _atParamStr === "function" ? _atParamStr(r.params) : "";
+    return `<tr class="${failed ? "is-fail" : ""}">` +
+      `<td><div class="at-dev-name">${escapeHtml(r.device || "—")}</div>${params ? `<div class="at-dev-params">${escapeHtml(params)}</div>` : ""}</td>` +
+      `<td>${_atModelChipHtml(r.target)}</td>` +
+      `<td>${_atModelChipHtml(r.theory)}</td>` +
+      `<td>${l1Badge}</td>` +
+      `<td class="mono">${escapeHtml(_atFmtCmd(r.expOrder, r.expPower))} → ${escapeHtml(_atFmtCmd(r.actOrder, r.actPower))}</td>` +
+      `<td>${l2Badge}</td>` +
+      `<td class="at-fail-cell">${tagHtml}${reason ? `<div class="at-fail-text">${escapeHtml(reason)}</div>` : `<div class="at-ok-text">—</div>`}</td>` +
+      `</tr>`;
+  }).join("");
+  return `<div class="at-checker-wrap">` +
+    `<div class="at-checker-head">${failN
+      ? `<span class="at-badge at-fail">${failN}/${list.length} 台失败</span>`
+      : `<span class="at-badge at-pass">${list.length} 台通过</span>`}</div>` +
+    `<table class="at-checker-table"><thead><tr><th>设备</th><th>目标</th><th>读回</th><th>从机</th><th>期望 → 实际</th><th>主机</th><th>失败原因</th></tr></thead><tbody>${rows}</tbody></table>` +
+    `</div>`;
+}
+
+function _atPlayerCheckerHtml(frame) {
+  const results = Array.isArray(frame.checkerState) ? frame.checkerState : [];
+  if (results.length) {
+    return _atCheckerTableHtml(results);
+  }
+  if (frame.note && !_atIsLegacyWhy(frame.note)) {
+    return `<div class="at-player-note">${escapeHtml(frame.note)}</div>`;
+  }
+  return `<div class="at-player-note">本帧没有逐设备检查结果。</div>`;
+}
+
+function _atPlayerStepHtml(frame) {
+  const phase = frame.phase;
+  if (phase === "before") {
+    return `<p class="at-step-lead">下发前各设备当前工况。</p>` +
+      _atDeviceStateTable(frame.familyState);
+  }
+  if (phase === "issued") {
+    return `<p class="at-step-lead">本步参数变更（旧值→新值）。</p>` +
+      _atIssuedTable(frame.issued);
+  }
+  if (phase === "mid") {
+    return `<p class="at-step-lead">观察窗口中点：各设备工况是否开始变化。</p>` +
+      _atDeviceStateTable(frame.familyState);
+  }
+  if (phase === "observe" || phase === "fail-focus") {
+    const failN = (frame.checkerState || []).filter((item) => !item.pass || item.error).length;
+    const total = (frame.checkerState || []).length;
+    const lead = phase === "fail-focus"
+      ? `<p class="at-step-lead">失败回溯：只看未通过设备的原因。</p>`
+      : `<p class="at-step-lead">${failN ? `检查结果：${failN}/${total} 台失败。` : `检查结果：${total} 台通过。`}</p>`;
+    return lead + _atPlayerCheckerHtml(frame);
+  }
+  if (phase === "restore") {
+    return `<p class="at-step-lead">已把本用例改过的参数恢复到下发前。</p>` +
+      (frame.issued && frame.issued.length ? _atIssuedTable(frame.issued) : "") +
+      _atDeviceStateTable(frame.familyState);
+  }
+  return _atPlayerCheckerHtml(frame);
+}
+
+function _atUpdateCaseRow(cycle) {
+  const row = document.querySelector(`.at-case-row[data-case-no="${cycle.no}"]`);
+  if (!row) return;
+  const status = row.querySelector(".at-case-status");
+  if (!status) return;
+  row.classList.toggle("is-fail", !!(cycle.failed || cycle.status === "fail"));
+  let reasonEl = row.querySelector(".at-case-reason");
+  if (cycle.status === "running" || (cycle.step && cycle.step !== "ready" && cycle.step !== "done")) {
+    status.className = "at-case-status at-case-running";
+    status.textContent = "执行中";
+    if (reasonEl) reasonEl.remove();
+  } else if (cycle.failed || cycle.status === "fail") {
+    status.className = "at-case-status at-case-fail";
+    status.textContent = "失败";
+    const text = _atFailLines(cycle.results).join("；") || "未通过";
+    if (!reasonEl) {
+      reasonEl = document.createElement("span");
+      reasonEl.className = "at-case-reason";
+      row.appendChild(reasonEl);
+    }
+    reasonEl.textContent = text;
+  } else if (cycle.status === "done") {
+    status.className = "at-case-status at-case-done";
+    status.textContent = "通过";
+    if (reasonEl) reasonEl.remove();
+  } else {
+    status.className = "at-case-status at-case-ready";
+    status.textContent = "就绪";
+    if (reasonEl) reasonEl.remove();
+  }
+}
+
+function _atRefreshLiveHost(home) {
+  const host = document.getElementById("flowHost");
+  if (!host || !home) return;
+  const canvasView = captureLiveCanvasView();
+  host.innerHTML = typeof renderHomeEnergyFlow === "function" ? renderHomeEnergyFlow(home) : "";
+  bindFlowHost(home);
+  restoreLiveCanvasView(canvasView);
+}
+
+async function _atReadDevices(home, devices) {
+  const list = (devices || []).filter(Boolean);
+  await Promise.all(list.map(async (dev) => {
+    try {
+      await readDevice(home, dev, { quiet: true });
+    } catch (_) {}
+  }));
+}
+
+async function _atCaptureFrame(home, cycle, phase, extra = {}) {
+  if (extra.readScope === "family") {
+    await _atReadDevices(home, home.devices || []);
+  } else if (extra.readScope === "device") {
+    await _atReadDevices(home, _atCycleDevices(home, cycle));
+  }
+  _atRefreshLiveHost(home);
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  let snap = { image: "", thumb: "" };
+  try {
+    snap = _atSnapshotData(await captureLiveViewCanvas());
+  } catch (err) {
+    extra.note = `${extra.note || ""} 截图失败：${err.message || err}`.trim();
+  }
+  const assignments = _atCycleAssignments(cycle);
+  const primary = assignments[0] || cycle;
+  const targetDevice = _atCycleDevice(home, cycle);
+  const owner = targetDevice ? classifyOwnerWorkModel(targetDevice) : null;
+  const actual = targetDevice?.ownerActual || null;
+  const frame = {
+    id: uid(),
+    at: Date.now(),
+    time: _nowHMS(),
+    phase,
+    title: extra.title || phase,
+    note: extra.note || "",
+    label: _atCycleLabel(cycle),
+    target: primary.target || cycle.target,
+    deviceId: primary.deviceId || cycle.deviceId,
+    device: _atCycleLabel(cycle),
+    image: snap.image,
+    thumb: snap.thumb,
+    strategyKey: primary.strategyKey || cycle.strategyKey,
+    coverageKey: primary.coverageKey || cycle.coverageKey,
+    params: { ...(primary.params || cycle.params || {}) },
+    deviceState: {
+      theory: owner ? owner.label : "—",
+      theoryChargeW: owner ? owner.chgCapW : null,
+      theoryDischargeW: owner ? owner.dchgCapW : null,
+      actualLabel: actual ? actual.label : "—",
+      actualOrder: _atStateLabel(actual),
+      actualPowerW: actual ? actual.cmdPowerW : null,
+    },
+    familyState: _atFamilyState(home),
+    homeFlow: _atHomeFlow(home),
+    issued: extra.issued || (phase === "issued" ? (cycle.issued || []).map((item) => ({ ...item })) : null),
+    checkerState: extra.checkerState || null,
+    emphasis: extra.emphasis || "",
+    failed: !!cycle.failed,
+  };
+  cycle.frames.push(frame);
+  renderCycleCard(cycle, cycle.failed ? "done fail" : "running");
+  _atUpdateCaseRow(cycle);
+  return frame;
+}
+
+/**
+ * @brief Bind once: click cycle head to expand/collapse finished cards
+ * @param[in] tl timeline container
+ * @return none
+ */
+function _atBindTimelineFold(tl) {
+  if (!tl || tl.dataset.foldBound === "1") {
+    return;
+  }
+  tl.dataset.foldBound = "1";
+  tl.addEventListener("click", (ev) => {
+    const head = ev.target.closest("[data-at-cycle-fold]");
+    if (!head) {
+      return;
+    }
+    const card = head.closest(".at-cycle");
+    if (!card) {
+      return;
+    }
+    const collapsed = card.classList.toggle("is-collapsed");
+    card.dataset.userOpen = collapsed ? "0" : "1";
+    head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  });
+}
+
 // 时间轴：把一个周期(cycle)渲染/更新成一张卡片
 function renderCycleCard(cycle, phase) {
   const tl = document.getElementById("autoTestTimeline");
   if (!tl) return;
+  _atBindTimelineFold(tl);
   let card = tl.querySelector(`[data-cycle="${cycle.no}"]`);
   if (!card) {
     card = document.createElement("div");
     card.setAttribute("data-cycle", String(cycle.no));
     tl.appendChild(card);
   }
-  card.className = `at-cycle ${phase || ""}`;
+  const finished = cycle.step === "done";
+  const userOpen = card.dataset.userOpen === "1";
+  const collapsed = finished && !userOpen;
+  card.className = `at-cycle ${phase || ""}${cycle.failed ? " fail" : ""}${collapsed ? " is-collapsed" : ""}`;
   const issuedRows = cycle.issued.length
     ? cycle.issued.map((it) =>
-        `<div class="at-issue-line">• ${escapeHtml(it.device)} ← <span class="mono">${escapeHtml(_atParamStr(it.params))}</span>${it.ok ? "" : ' <span class="at-badge at-fail">下发失败</span>'}</div>`
+        `<div class="at-issue-line">• ${escapeHtml(it.device)} → <b>${escapeHtml(it.target || cycle.target || "—")}</b> ← <span class="mono">${escapeHtml(_atParamStr(it.params)) || "天然命中"}</span>${it.ok ? "" : ' <span class="at-badge at-fail">下发失败</span>'}</div>`
       ).join("")
-    : `<div class="hint">（无可下发设备）</div>`;
+    : `<div class="hint">（等待下发）</div>`;
+  const framesHtml = cycle.frames?.length
+    ? `<div class="at-frame-strip">` +
+        cycle.frames.map((frame) =>
+          `<figure class="at-frame ${frame.emphasis === "fail" ? "is-fail" : ""}">
+            <img src="${escapeAttr(frame.thumb || frame.image)}" alt="${escapeAttr(frame.title || frame.phase)}" />
+            <figcaption><b>${escapeHtml(frame.time)}</b> ${escapeHtml(_atPhaseLabel(frame.phase))}<div class="at-frame-brief">${escapeHtml(_atFrameOneLiner(frame))}</div></figcaption>
+          </figure>`
+        ).join("") +
+      `</div>`
+    : "";
   let resultBlock;
   if (cycle.results.length) {
-    const suppTag = cycle.chg2Suppressed
-      ? ` <span class="at-badge at-skip" title="充1需求超过可放总+三方光伏(或电网购电限)，主机抑制充2及对应放电">充2抑制生效</span>`
-      : "";
-    const l2Badge = (r) =>
-      r.masterPass === null
-        ? `<span class="at-badge at-skip" title="${escapeHtml(r.masterNote)}">参考</span>`
-        : `<span class="at-badge ${r.masterPass ? "at-pass" : "at-fail"}" title="${escapeHtml(r.masterNote)}">${r.masterPass ? "通过" : "失败"}</span>`;
-    const l1Badge = (r) =>
-      `<span class="at-badge ${r.hitTarget ? "at-pass" : "at-fail"}" title="读回态 ${escapeHtml(r.theory)} ${r.hitTarget ? "==" : "≠"} 目标 ${escapeHtml(cycle.target)}">${r.hitTarget ? "命中" : "未中"}</span>`;
     resultBlock =
-      `<div class="at-step"><span class="t">${escapeHtml(cycle.tObserve || "")}</span>观察结果（等待 ${cycle.settle}s 后读取）：${suppTag}</div>` +
-      `<table><thead><tr><th>设备</th><th title="从机 S1–S13 判定链：读回态是否==目标态">从机判定</th><th>读回态</th>` +
-      `<th title="主机多机分配：DP98 实际 order/功率 是否==期望分配">主机决策</th><th>期望→实际</th></tr></thead><tbody>` +
-      cycle.results.map((r) =>
-        `<tr><td>${escapeHtml(r.device)}</td>` +
-        `<td>${l1Badge(r)}</td>` +
-        `<td class="mono" title="目标 ${escapeHtml(cycle.target)}">${escapeHtml(r.theory)}</td>` +
-        `<td>${l2Badge(r)}</td>` +
-        `<td class="mono" title="${escapeHtml(r.masterNote)}">${escapeHtml(r.expOrder)}/${r.expPower == null ? "—" : r.expPower + "W"} → ${escapeHtml(r.actOrder)}/${r.actPower == null ? "—" : r.actPower + "W"}</td></tr>`
-      ).join("") +
-      `</tbody></table>`;
+      `<div class="at-step"><span class="t">${escapeHtml(cycle.tObserve || "")}</span>结果回收${cycle.failed ? ' <span class="at-badge at-fail">失败</span>' : ""}</div>` +
+      _atCheckerTableHtml(cycle.results) +
+      framesHtml;
+  } else if (cycle.step === "runtime" || cycle.step === "checker") {
+    resultBlock = `<div class="at-step"><span class="at-badge at-wait">等待观察窗口…</span></div>${framesHtml}`;
   } else {
-    resultBlock = `<div class="at-step"><span class="at-badge at-wait">等待 ${cycle.settle}s 观察…</span></div>`;
+    resultBlock = framesHtml;
   }
   card.innerHTML =
-    `<div class="at-cycle-head"><span class="at-cycle-no">周期 ${cycle.no}</span><span class="at-cycle-target">目标 ${escapeHtml(cycle.target)}</span><span class="at-cycle-time">起始 ${escapeHtml(cycle.tIssue)}</span></div>` +
-    `<div class="at-step"><span class="t">${escapeHtml(cycle.tIssue)}</span>准点下发到 ${cycle.issued.length} 台：</div>${issuedRows}` +
-    resultBlock;
+    `<div class="at-cycle-head" data-at-cycle-fold="1" role="button" tabindex="0" aria-expanded="${collapsed ? "false" : "true"}">` +
+      `<span class="at-cycle-chevron" aria-hidden="true"></span>` +
+      `<span class="at-cycle-no">用例 ${cycle.no}</span>` +
+      `<span class="at-cycle-target">${escapeHtml(_atCycleLabel(cycle))}</span>` +
+      `<span class="at-cycle-time">${escapeHtml(cycle.tIssue || "")}</span>${_atStatusBadge(cycle)}` +
+    `</div>` +
+    `<div class="at-cycle-body">` +
+      `<div class="at-pipeline">${_atRenderStepPipeline(cycle)}</div>` +
+      `<div class="at-step"><span class="t">${escapeHtml(cycle.tIssue || "—")}</span>下发到 ${cycle.issued.length || _atCycleAssignments(cycle).length} 台：</div>${issuedRows}` +
+      resultBlock +
+    `</div>`;
+  _atUpdateCaseRow(cycle);
 }
 
 const _atL2Txt = (r) => (r.masterPass === null ? "参考" : r.masterPass ? "通过" : "失败");
+function _atFlattenFrames(cycles) {
+  return cycles.flatMap((cycle) => (cycle.frames || []).map((frame) => ({
+    ...frame,
+    cycleNo: cycle.no,
+    failed: !!cycle.failed,
+  }))).sort((a, b) => Number(a.at || 0) - Number(b.at || 0));
+}
+
 function _atReportMd(home, cycles, settle) {
   const flat = cycles.flatMap((c) => c.results);
   const pass = flat.filter((r) => r.pass).length;
@@ -7197,195 +9174,1298 @@ function _atReportMd(home, cycles, settle) {
   md += `- 综合通过：${pass}/${flat.length}（失败 ${fail}）\n`;
   md += `- L1 从机判定（读回态命中目标态）：${l1ok}/${flat.length}\n`;
   md += `- L2 主机决策（DP98 分配==期望）：${l2ok}/${l2judged.length} 可硬判（其余 ${flat.length - l2judged.length} 组依赖能量守恒/未采集量，仅参考）\n\n`;
-  md += `> 判定说明：L1 测从机 S1–S13 判定链；L2 用整簇上报态按分配优先级（充1强充 / 充2抑制 / 一充一放）算出主机期望决策，与 DP98 实际 order+cmdPower 比对。上报态与主机决策本就可能不同，故两层独立呈现。\n\n`;
+  md += `> 判定说明：L1 测从机 S1–S13 判定链；L2 用整簇上报态按分配优先级（充1强充 / 充2抑制 / 一充一放）算出主机期望决策，与 DP98 实际 order+cmdPower 比对。每个周期都保留前态、下发后、中间态、终态时间帧。\n\n`;
   for (const c of cycles) {
-    md += `## 周期 ${c.no} · 目标「${c.target}」${c.chg2Suppressed ? " · 充2抑制生效" : ""}\n\n`;
-    md += `- ${c.tIssue} 准点下发：${c.issued.map((it) => `${it.device}(${_atParamStr(it.params)})`).join("；") || "无"}\n`;
+    const label = _atCycleLabel(c);
+    md += `## 用例 ${c.no} · ${label}${c.failed ? " · 失败高亮" : ""}\n\n`;
+    md += `- ${c.tIssue || "—"} 下发：${c.issued.map((it) => `${it.device}[${it.target || c.target}](${_atParamStr(it.params) || "天然命中"})`).join("；") || "无"}\n`;
+    md += `- 时间帧：${(c.frames || []).map((f) => `${f.time} ${_atPhaseLabel(f.phase)}`).join(" → ") || "无"}\n`;
+    for (const frame of c.frames || []) {
+      if (frame.phase === "fail-focus") {
+        continue;
+      }
+      md += `\n### ${_atPhaseLabel(frame.phase)}\n\n`;
+      if (frame.homeFlow && (frame.phase === "before" || frame.phase === "mid" || frame.phase === "restore")) {
+        md += `- 家庭流向：PV ${_atW(frame.homeFlow.pvTotal)} · Bypass ${_atW(frame.homeFlow.bypass)} · ${_atGridFlowTxt(frame.homeFlow)} · DP98 充 ${_atW(frame.homeFlow.actChg)} / 放 ${_atW(frame.homeFlow.actDchg)}\n`;
+        for (const item of frame.familyState || []) {
+          md += `  - ${item.device}：SoC ${item.soc == null ? "—" : item.soc + "%"} · ${item.theory} · DP98 ${_atFmtCmd(item.actualOrder, item.actualPowerW)} · PV ${_atW(item.pv)} / Bypass ${_atW(item.bypass)}\n`;
+        }
+      }
+      if (frame.phase === "issued") {
+        for (const item of frame.issued || c.issued || []) {
+          md += `  - ${item.device} → ${item.target || "—"}：${_atParamHuman(item.params) || "天然命中，未改参"}${item.ok === false ? " · 下发失败" : ""}\n`;
+        }
+      }
+      if (frame.phase === "observe" || frame.phase === "fail-focus") {
+        const failLines = _atFailLines(frame.checkerState || c.results);
+        md += failLines.length ? failLines.map((line) => `- ${line}\n`).join("") : "- 全部通过\n";
+      }
+    }
+    md += `\n`;
     md += `- ${c.tObserve || ""} 观察：\n\n`;
-    md += `| 设备 | 目标态 | 读回态 | L1从机 | 期望决策 | 实际决策 | L2主机 | 综合 | 备注 |\n|---|---|---|---|---|---|---|---|---|\n`;
+    const failLines = _atFailLines(c.results);
+    if (failLines.length) {
+      md += `**失败原因**\n`;
+      for (const line of failLines) {
+        md += `- ${line}\n`;
+      }
+      md += `\n`;
+    }
+    md += `| 设备 | 目标态 | 读回态 | L1从机 | 期望决策 | 实际决策 | L2主机 | 综合 | 失败原因 |\n|---|---|---|---|---|---|---|---|---|\n`;
     for (const r of c.results) {
-      const exp = `${r.expOrder}/${r.expPower == null ? "—" : r.expPower + "W"}`;
-      const act = `${r.actOrder}/${r.actPower == null ? "—" : r.actPower + "W"}`;
-      md += `| ${r.device} | ${c.target} | ${r.theory} | ${r.hitTarget ? "命中" : "未中"} | ${exp} | ${act} | ${_atL2Txt(r)} | ${r.pass ? "通过" : "失败"} | ${(r.masterNote || r.error || "").replace(/\n/g, " ")} |\n`;
+      const exp = _atFmtCmd(r.expOrder, r.expPower);
+      const act = _atFmtCmd(r.actOrder, r.actPower);
+      md += `| ${r.device} | ${r.target || c.target} | ${r.theory} | ${r.hitTarget ? "命中" : "未中"} | ${exp} | ${act} | ${_atL2Txt(r)} | ${r.pass ? "通过" : "失败"} | ${(_atFailReason(r) || "").replace(/\n/g, " ")} |\n`;
     }
     md += `\n`;
   }
   return md;
 }
 function _atReportCsv(cycles) {
-  const head = ["周期", "下发时刻", "观察时刻", "设备", "设备ID", "目标工况", "下发参数", "读回态", "L1从机判定", "期望order", "期望功率W", "实际order", "实际功率W", "L2主机决策", "综合", "备注"];
+  const head = ["周期", "设备", "设备ID", "目标工况", "构造策略", "下发时刻", "观察时刻", "下发参数", "读回态", "L1从机判定", "期望order", "期望功率W", "实际order", "实际功率W", "L2主机决策", "综合", "失败原因"];
   const esc = (s) => `"${String(s ?? "").replace(/"/g, '""')}"`;
   const lines = [head.map(esc).join(",")];
   for (const c of cycles) {
     for (const r of c.results) {
       lines.push([
-        c.no, c.tIssue, c.tObserve || "", r.device, r.deviceId, c.target, _atParamStr(r.params),
+        c.no, r.device, r.deviceId, r.target || c.target, r.coverageKey || "", c.tIssue, c.tObserve || "", _atParamStr(r.params),
         r.theory, r.hitTarget ? "Y" : "N", r.expOrder, r.expPower == null ? "" : r.expPower,
         r.actOrder, r.actPower == null ? "" : r.actPower, _atL2Txt(r), r.pass ? "PASS" : "FAIL",
-        (r.masterNote || r.error || "").replace(/\n/g, " "),
+        _atFailReason(r).replace(/\n/g, " "),
       ].map(esc).join(","));
     }
   }
   return lines.join("\n");
 }
 
-async function runAutoTest() {
-  if (atRunning) return;
-  const home = activeHome();
-  if (!home) { toast("请先选择家庭", "error"); return; }
-  const matrix = buildAutoMatrix(home);
-  // 按目标工况分组成周期（每周期同一时刻准点下发到所有可测设备）
-  const cycleTargets = AUTO_TARGETS
-    .map((t) => t.target)
-    .filter((tg) => matrix.some((r) => r.target === tg && r.feasible));
-  if (!cycleTargets.length) { toast("没有可测的组合（先「一键读取」拿到 SoC）", "error"); return; }
-  const settle = Math.max(3, Number(document.getElementById("atSettle").value || 15));
-  const restore = document.getElementById("atRestore").checked;
-  if (!confirm(`将分 ${cycleTargets.length} 个周期，每周期同一时刻准点下发到所有可测设备并等待 ${settle}s 观察，会真实改设备参数。确认开始？`)) return;
-
-  atRunning = true;
-  atShowResults = true;
-  document.getElementById("btnAutoTestRun").disabled = true;
-  document.getElementById("autoTestBody").innerHTML = ""; // 收起矩阵预览
-  document.getElementById("autoTestReport").classList.add("hidden");
-  const tl = document.getElementById("autoTestTimeline");
-  tl.classList.remove("hidden");
-  tl.innerHTML = "";
-  _atSetProg(0, cycleTargets.length, "开始…");
-
-  // 记录原始参数用于恢复
-  const orig = {};
-  for (const dev of home.devices) {
-    orig[dev.uid] = {
-      work_mode: dev.values?.work_mode != null ? String(dev.values.work_mode) : "",
-      backup_soc: dev.values?.backup_soc != null ? String(dev.values.backup_soc) : "",
-    };
-  }
-  const cycles = [];
-  const touched = new Set();
-  try {
-    let no = 0;
-    for (const target of cycleTargets) {
-      no += 1;
-      const feas = matrix.filter((r) => r.target === target && r.feasible);
-      const cycle = { no, target, settle, tIssue: _nowHMS(), tObserve: null, issued: [], results: [] };
-      cycles.push(cycle);
-      _atSetProg(no - 1, cycleTargets.length, `周期 ${no}/${cycleTargets.length} · 目标「${target}」· 准点下发`);
-      // 同一时刻并发下发到所有可测设备
-      await Promise.all(feas.map(async (r) => {
-        const dev = home.devices.find((d) => d.uid === r.uid);
-        if (!dev) return;
-        touched.add(dev.uid);
-        for (const [k, v] of Object.entries(r.params)) dev.drafts[k] = String(v);
-        let ok = false, err = null;
-        try { ok = await issueDevice(home, dev, { batch: true }); } catch (e) { err = String(e.message || e); }
-        cycle.issued.push({ device: dev.name || dev.deviceId, deviceId: dev.deviceId, uid: dev.uid, params: { ...r.params }, ok, err });
-      }));
-      renderCycleCard(cycle, "running");
-      _atSetProg(no - 1, cycleTargets.length, `周期 ${no}/${cycleTargets.length} · 等待 ${settle}s 观察`);
-      await _atSleep(settle * 1000);
-      cycle.tObserve = _nowHMS();
-      // 先把本周期所有设备读回，再算整簇主机期望决策（分配依赖全簇上报态）
-      await Promise.all(cycle.issued.map(async (it) => {
-        const dev = home.devices.find((d) => d.uid === it.uid);
-        if (dev) { try { await readDevice(home, dev, { quiet: true }); } catch (_) {} }
-      }));
-      const expect = computeMasterExpect(home, _atMasterOpts());
-      cycle.chg2Suppressed = expect.chg2Suppressed;
-      for (const it of cycle.issued) {
-        const dev = home.devices.find((d) => d.uid === it.uid);
-        if (!dev) continue;
-        const owner = classifyOwnerWorkModel(dev);
-        const theory = owner ? owner.label : "—"; // 从机上报态(读回)
-        const act = dev.ownerActual;
-        const actLabel = act ? act.label : "—";
-        const actOrder = act ? (act.order === 1 ? "充" : act.order === 2 ? "放" : "待机") : "—";
-        const actPower = act ? act.cmdPowerW : null;
-        // L1 从机判定：读回态命中目标态（测 S1–S13 判定链）
-        const hitTarget = theory !== "—" && theory === target;
-        // L2 主机决策：DP98 实际 order/功率 == 期望分配（测主机分配逻辑）
-        const ex = expect.byUid[it.uid];
-        let masterPass = null, masterNote = "", expOrder = "—", expPower = null, expBand = null;
-        if (!ex) {
-          masterNote = "无期望模型（未读到上报态）";
-        } else if (!ex.determinable) {
-          masterNote = ex.why; // 参考不硬判
-          expOrder = ex.order; expPower = ex.powerW; expBand = ex.band;
-        } else {
-          expOrder = ex.order; expPower = ex.powerW; expBand = ex.band;
-          const dirOk = actOrder === ex.order;
-          const powOk = actPower != null && actPower >= ex.band[0] && actPower <= ex.band[1];
-          masterPass = dirOk && powOk;
-          masterNote =
-            `期望 ${ex.order}/${ex.powerW}W(容 ${ex.band[0]}~${ex.band[1]}) · 实际 ${actOrder}/${actPower == null ? "—" : actPower}W` +
-            (dirOk ? "" : " · 方向不符") + (powOk || !dirOk ? "" : " · 功率越界") + " · " + ex.why;
-        }
-        cycle.results.push({
-          device: it.device, deviceId: it.deviceId, params: it.params, target,
-          theory, actLabel, actOrder, actPower,
-          hitTarget,                                   // L1
-          expOrder, expPower, expBand, masterPass, masterNote, // L2 (masterPass null=参考)
-          pass: hitTarget && masterPass !== false,     // 综合：从机命中 且 主机未判错
-          error: it.err,
-        });
-      }
-      renderCycleCard(cycle, "done");
-      _atSetProg(no, cycleTargets.length, `周期 ${no}/${cycleTargets.length} 完成`);
-    }
-    if (restore) {
-      _atSetProg(cycleTargets.length, cycleTargets.length, "恢复各设备原始参数…");
-      for (const uid of touched) {
-        const dev = home.devices.find((d) => d.uid === uid);
-        if (!dev) continue;
-        const o = orig[uid] || {};
-        dev.drafts.work_mode = o.work_mode || "";
-        dev.drafts.backup_soc = o.backup_soc || "";
-        try { await issueDevice(home, dev, { batch: true }); } catch (_) {}
-        dev.drafts.work_mode = "";
-        dev.drafts.backup_soc = "";
-      }
-    }
-  } finally {
-    atRunning = false;
-    document.getElementById("btnAutoTestRun").disabled = false;
-  }
-  await finishAutoTest(home, cycles, settle);
-}
-
-async function finishAutoTest(home, cycles, settle) {
-  const flat = cycles.flatMap((c) => c.results);
+function _atReportPayload(home, cycles, settle, savedId, extra = {}) {
+  const flat = cycles.flatMap((c) => c.results || []);
   const pass = flat.filter((r) => r.pass).length;
   const fail = flat.length - pass;
   const l1ok = flat.filter((r) => r.hitTarget).length;
   const l2j = flat.filter((r) => r.masterPass !== null);
   const l2ok = l2j.filter((r) => r.masterPass).length;
+  const planned = extra.planned != null ? extra.planned : cycles.length;
+  const status = extra.status || "done";
+  const caseStats = _atReportCaseStats({ cycles, planned, status, paused: status === "paused" });
+  return {
+    id: savedId || extra.reportId || null,
+    createdAt: Date.now(),
+    settle,
+    homeId: home.homeId || "",
+    homeName: home.name || "",
+    status,
+    planned,
+    paused: status === "paused",
+    summary: {
+      cycles: cycles.length,
+      planned,
+      total: flat.length,
+      passed: pass,
+      failed: fail,
+      l1ok,
+      l2ok,
+      l2judged: l2j.length,
+      status,
+      casesTotal: caseStats.total,
+      casesPassed: caseStats.passed,
+      casesFailed: caseStats.failed,
+      casesPaused: caseStats.paused,
+    },
+    cycles: cycles.map((cycle) => ({
+      ...cycle,
+      frames: cycle.frames || [],
+      results: cycle.results || [],
+    })),
+    frames: _atFlattenFrames(cycles),
+  };
+}
+
+function _atParseWatt(re, text) {
+  const m = re.exec(text);
+  return m ? Number(m[1]) : null;
+}
+
+function _atParseFlowLine(line) {
+  const text = String(line || "");
+  let gridW = _atParseWatt(/电网取电\s+(-?\d+)\s*W/, text);
+  if (gridW == null) {
+    const feed = _atParseWatt(/电网馈网\s+(-?\d+)\s*W/, text);
+    gridW = feed == null ? _atParseWatt(/电网\s+(-?\d+)\s*W/, text) : -feed;
+  }
+  return {
+    pvTotal: _atParseWatt(/PV\s+(-?\d+)\s*W/, text),
+    bypass: _atParseWatt(/Bypass\s+(-?\d+)\s*W/, text),
+    actChg: _atParseWatt(/DP98 充\s+(-?\d+)\s*W/, text),
+    actDchg: _atParseWatt(/放\s+(-?\d+)\s*W/, text),
+    gridW,
+    familyLoad: _atParseWatt(/家庭负载\s+(-?\d+)\s*W/, text),
+    bypasses: [],
+  };
+}
+
+function _atParseDeviceLine(line) {
+  const m = /^\s*-\s*(.+?)：SoC\s+(\d+|—)%?\s*·\s*(.+?)\s*·\s*DP98\s+(\S+)\s*·\s*PV\s+(-?\d+)W\s*\/\s*Bypass\s+(-?\d+)W/.exec(line);
+  if (!m) {
+    return null;
+  }
+  const dp = m[4] === "—" ? { actualOrder: "—", actualPowerW: null } : (() => {
+    const hit = /^([^/]+)\/(\d+)W$/.exec(m[4]);
+    return hit ? { actualOrder: hit[1], actualPowerW: Number(hit[2]) } : { actualOrder: m[4], actualPowerW: null };
+  })();
+  return {
+    device: m[1].trim(),
+    soc: m[2] === "—" ? null : Number(m[2]),
+    theory: m[3].trim(),
+    pv: Number(m[5]),
+    bypass: Number(m[6]),
+    ...dp,
+  };
+}
+
+function _atParseIssueItems(text) {
+  return String(text || "").split(/；|;/).map((part) => {
+    const m = /(.+?)\[([^\]]+)\](?:\(([^)]*)\))?/.exec(part.trim());
+    if (!m) {
+      return null;
+    }
+    const params = {};
+    for (const kv of String(m[3] || "").split(/\s+/)) {
+      const idx = kv.indexOf("=");
+      if (idx > 0) {
+        params[kv.slice(0, idx)] = kv.slice(idx + 1);
+      }
+    }
+    return { device: m[1].trim(), target: m[2], params, ok: true };
+  }).filter(Boolean);
+}
+
+function _atCyclesFromMarkdown(md) {
+  const blocks = String(md || "").split(/^## 用例\s+/m).slice(1);
+  return blocks.map((block, idx) => {
+    const headLine = (block.split("\n")[0] || "").trim();
+    const head = /^(\d+)\s*·\s*(.+?)(?:\s*·\s*失败高亮)?$/.exec(headLine);
+    const no = head ? Number(head[1]) : idx + 1;
+    const label = head ? head[2].trim() : headLine || `用例 ${no}`;
+    const issueHit = block.match(/下发：(.+)/);
+    const issued = issueHit ? _atParseIssueItems(issueHit[1]) : [];
+    const sections = {};
+    let cur = "";
+    for (const line of block.split("\n")) {
+      const h = /^###\s+(.+)/.exec(line);
+      if (h) {
+        cur = h[1].trim();
+        sections[cur] = [];
+        continue;
+      }
+      if (cur) {
+        sections[cur].push(line);
+      }
+    }
+    const pick = sections["运行中"] || sections["检查"] || sections["回收"] || sections["开始前"] || [];
+    const flowLine = pick.find((line) => line.includes("家庭流向")) || "";
+    const flow = flowLine ? _atParseFlowLine(flowLine) : null;
+    const family = pick.map(_atParseDeviceLine).filter(Boolean);
+    if (flow && family.length) {
+      flow.bypasses = family.map((item) => ({ device: item.device, w: item.bypass }));
+    }
+    const results = [];
+    for (const line of block.split("\n")) {
+      if (!line.startsWith("|") || /---/.test(line) || /设备/.test(line) && /目标/.test(line)) {
+        continue;
+      }
+      const cells = line.split("|").slice(1, -1).map((cell) => cell.trim());
+      if (cells.length < 8) {
+        continue;
+      }
+      const pass = cells[7] === "通过";
+      results.push({
+        device: cells[0],
+        target: cells[1],
+        theory: cells[2],
+        hitTarget: cells[3] === "命中",
+        pass,
+        masterPass: cells[6] === "通过" ? true : cells[6] === "失败" ? false : null,
+        failReason: cells[8] || "",
+        failTags: pass ? [] : (cells[8] ? [cells[8]] : ["未通过"]),
+      });
+    }
+    const failed = results.some((item) => !item.pass);
+    return {
+      no,
+      label,
+      issued,
+      assignments: issued.map((item) => ({ ...item })),
+      results,
+      frames: flow || family.length
+        ? [{ phase: "observe", homeFlow: flow, familyState: family, checkerState: results, failed }]
+        : [],
+      failed,
+      status: failed ? "fail" : "done",
+    };
+  });
+}
+
+function _atHydrateReport(report) {
+  if (!report) {
+    return report;
+  }
+  if (Array.isArray(report.cycles) && report.cycles.length) {
+    return report;
+  }
+  if (report.markdown) {
+    report.cycles = _atCyclesFromMarkdown(report.markdown);
+    report.frames = typeof _atFlattenFrames === "function" ? _atFlattenFrames(report.cycles) : [];
+  }
+  return report;
+}
+
+function _atPersistableReport(report) {
+  /** Keep frame image/thumb for server-side disk persist; server rewrites to asset URLs. */
+  if (!report || typeof report !== "object") {
+    return report;
+  }
+  return report;
+}
+
+function _atReportCaseStats(report) {
+  const cycles = report?.cycles || [];
+  const summary = report?.summary;
+  const sumTxt = typeof summary === "string" ? summary : "";
+  const pair = sumTxt.match(/(\d+)\s*\/\s*(\d+)\s*用例/);
+  const planned = Number(
+    report?.planned
+    ?? (summary && typeof summary === "object" ? summary.planned : null)
+    ?? (pair ? pair[2] : null)
+    ?? cycles.length
+  ) || 0;
+  let passed = 0;
+  let failed = 0;
+  let pausedRun = 0;
+  for (const cycle of cycles) {
+    if (cycle.status === "paused" || cycle.status === "running") {
+      pausedRun += 1;
+    } else if (cycle.failed || cycle.status === "fail") {
+      failed += 1;
+    } else if (cycle.status === "done" || (cycle.results && cycle.results.length)) {
+      passed += 1;
+    } else {
+      pausedRun += 1;
+    }
+  }
+  const unrun = Math.max(0, planned - cycles.length);
+  return {
+    total: planned || cycles.length,
+    ran: cycles.length,
+    passed,
+    failed,
+    paused: pausedRun + unrun,
+  };
+}
+
+function _atReportCycleByNo(no) {
+  return (atLastReport?.cycles || []).find((cycle) => Number(cycle.no) === Number(no)) || null;
+}
+
+function _atCycleSnapshot(cycle) {
+  const frames = cycle?.frames || [];
+  const prefer = ["observe", "mid", "before", "restore"];
+  let snap = null;
+  for (const phase of prefer) {
+    snap = frames.find((frame) => frame.phase === phase && (frame.homeFlow || (frame.familyState || []).length));
+    if (snap) {
+      break;
+    }
+  }
+  if (!snap) {
+    snap = [...frames].reverse().find((frame) => frame.homeFlow || (frame.familyState || []).length) || frames[frames.length - 1] || null;
+  }
+  return {
+    flow: snap?.homeFlow || null,
+    family: snap?.familyState || [],
+    issued: cycle?.issued || snap?.issued || [],
+  };
+}
+
+function _atCycleConstructTxt(cycle) {
+  const assigns = _atCycleAssignments(cycle);
+  const rows = assigns.length
+    ? assigns
+    : (cycle?.issued || []).map((item) => ({
+      device: item.device,
+      target: item.target,
+      params: item.params,
+    }));
+  if (!rows.length) {
+    return cycle?.label || "—";
+  }
+  return rows.map((item) => {
+    const human = _atParamHuman(item.params);
+    return `${item.device || "—"}→${item.target || "—"}${human ? `（${human}）` : ""}`;
+  }).join(" · ");
+}
+
+function _atCycleConstructHtml(cycle) {
+  const assigns = _atCycleAssignments(cycle);
+  const rows = assigns.length
+    ? assigns
+    : (cycle?.issued || []).map((item) => ({
+      device: item.device,
+      target: item.target,
+      params: item.params,
+    }));
+  if (!rows.length) {
+    return `<span class="hint">${escapeHtml(cycle?.label || "—")}</span>`;
+  }
+  return `<div class="at-construct-list">` + rows.map((item) => {
+    const chips = _atLibParamChips(item.params || {});
+    return `<div class="at-construct-item">` +
+      `<span class="at-construct-dev">${escapeHtml(item.device || "—")}</span>` +
+      `<span class="at-construct-arrow">→</span>` +
+      _atModelChipHtml(item.target) +
+      (Object.keys(item.params || {}).length ? `<span class="at-construct-params">${chips}</span>` : "") +
+    `</div>`;
+  }).join("") + `</div>`;
+}
+
+function _atCycleVerdict(cycle) {
+  const fails = (cycle?.results || []).filter((item) => !item.pass || item.error);
+  if (cycle?.status === "paused" || cycle?.status === "running") {
+    return { kind: "paused", label: "暂停", text: "未跑完" };
+  }
+  if (cycle?.failed || cycle?.status === "fail" || fails.length) {
+    const text = fails.map((item) => {
+      const tags = (item.failTags || _atFailTags(item)).join("/");
+      return `${item.device}${tags ? ` ${tags}` : ""}`;
+    }).join(" · ") || _atFailLines(cycle?.results).join("；") || "未通过";
+    return { kind: "fail", label: "失败", text };
+  }
+  if (cycle?.status === "done" || (cycle?.results && cycle.results.length)) {
+    return { kind: "pass", label: "通过", text: "" };
+  }
+  return { kind: "paused", label: "未完成", text: "" };
+}
+
+function _atReportStatsHtml(stats) {
+  return `<div class="at-report-stats">` +
+    `<div class="at-stat"><span>共</span><b>${stats.total}</b><span>用例</span></div>` +
+    `<div class="at-stat is-pass"><span>通过</span><b>${stats.passed}</b></div>` +
+    `<div class="at-stat is-fail"><span>失败</span><b>${stats.failed}</b></div>` +
+    `<div class="at-stat is-pause"><span>暂停</span><b>${stats.paused}</b></div>` +
+    `</div>`;
+}
+
+function _atReportFrameSet() {
+  const cycle = atReportCycleNo != null ? _atReportCycleByNo(atReportCycleNo) : null;
+  const frames = cycle
+    ? (cycle.frames || []).map((frame) => ({ ...frame, cycleNo: cycle.no, failed: !!cycle.failed }))
+    : (atLastReport?.frames || []);
+  if (cycle) {
+    return frames;
+  }
+  return atReportOnlyFailures ? frames.filter((frame) => frame.failed || frame.emphasis === "fail") : frames;
+}
+
+async function _atFetchReportList() {
+  try {
+    const res = await fetch("/api/reports");
+    const json = await res.json();
+    return json.reports || [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function _atReportBelongsToHome(item, home) {
+  if (!item || !home) {
+    return false;
+  }
+  const ids = [home.homeId, home.uid].map((value) => String(value || "").trim()).filter(Boolean);
+  const names = [
+    home.name,
+    typeof homeDisplayName === "function" ? homeDisplayName(home) : "",
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+  const hid = String(item.homeId || "").trim();
+  if (hid && ids.includes(hid)) {
+    return true;
+  }
+  const fromFile = String(item.id || "").includes("_")
+    ? String(item.id).split("_").slice(1).join("_")
+    : "";
+  if (fromFile && ids.includes(fromFile)) {
+    return true;
+  }
+  const hname = String(item.homeName || "").trim();
+  return !!hname && names.includes(hname);
+}
+
+async function _atLoadReport(reportId) {
+  if (!reportId) return;
+  if (atRunning) {
+    toast("测试进行中，请先暂停再回放", "error");
+    return;
+  }
+  try {
+    const res = await fetch(`/api/report?id=${encodeURIComponent(reportId)}&fmt=json`);
+    const json = await res.json();
+    if (!json.report) {
+      toast("回放加载失败", "error");
+      return;
+    }
+    const report = json.report;
+    if (!(report.cycles && report.cycles.length) && !report.markdown) {
+      try {
+        const mdRes = await fetch(`/api/report?id=${encodeURIComponent(reportId)}&fmt=md`);
+        if (mdRes.ok) {
+          report.markdown = await mdRes.text();
+        }
+      } catch (_) {}
+    }
+    _atApplyReplayReport(report, reportId);
+  } catch (e) {
+    toast(`回放加载失败：${e.message || e}`, "error");
+  }
+}
+
+async function openAutoTestReplay(reportId) {
+  await _atLoadReport(reportId);
+  if (atInnerTab !== "report") {
+    setAtInnerTab("report");
+  }
+}
+
+function _atApplyReplayReport(report, savedId) {
+  atShowResults = true;
+  atLastReport = _atHydrateReport(report);
+  atLastReport.id = savedId;
+  atReportFrameIndex = 0;
+  atReportOnlyFailures = false;
+  atReportCycleNo = null;
+  const body = document.getElementById("autoTestBody");
+  if (body) body.innerHTML = "";
+  document.getElementById("autoTestProgress")?.classList.add("hidden");
+  _atRenderReportPlayer(savedId);
+}
+
+function _atBindReportList(rep, savedId) {
+  rep.querySelector("#atToggleFailures")?.addEventListener("click", () => {
+    atReportOnlyFailures = !atReportOnlyFailures;
+    _atRenderReportPlayer(savedId);
+  });
+  rep.querySelectorAll("[data-report-case]").forEach((row) => {
+    row.addEventListener("click", () => {
+      atReportCycleNo = Number(row.getAttribute("data-report-case") || 0);
+      atReportFrameIndex = 0;
+      _atRenderReportPlayer(savedId);
+    });
+  });
+}
+
+let atPeekZoom = { scale: 1, x: 0, y: 0 };
+
+function _atResetPeekZoom() {
+  atPeekZoom = { scale: 1, x: 0, y: 0 };
+  const img = document.getElementById("atFramePeekImg");
+  if (img) {
+    img.style.transform = "";
+  }
+}
+
+function _atApplyPeekZoom() {
+  const img = document.getElementById("atFramePeekImg");
+  const view = document.getElementById("atFramePeekView");
+  if (!img || !view) {
+    return;
+  }
+  const scale = Math.max(1, Math.min(8, atPeekZoom.scale));
+  atPeekZoom.scale = scale;
+  const vw = view.clientWidth || 1;
+  const vh = view.clientHeight || 1;
+  const iw = img.offsetWidth * scale;
+  const ih = img.offsetHeight * scale;
+  const minX = Math.min(0, vw - iw);
+  const minY = Math.min(0, vh - ih);
+  atPeekZoom.x = Math.max(minX, Math.min(0, atPeekZoom.x));
+  atPeekZoom.y = Math.max(minY, Math.min(0, atPeekZoom.y));
+  if (scale <= 1.001) {
+    atPeekZoom.scale = 1;
+    atPeekZoom.x = 0;
+    atPeekZoom.y = 0;
+  }
+  img.style.transform = `translate(${atPeekZoom.x}px, ${atPeekZoom.y}px) scale(${atPeekZoom.scale})`;
+}
+
+function _atZoomPeekAt(view, clientX, clientY, nextScale) {
+  const rect = view.getBoundingClientRect();
+  const cx = clientX - rect.left;
+  const cy = clientY - rect.top;
+  const prev = atPeekZoom.scale;
+  const scale = Math.max(1, Math.min(8, nextScale));
+  const k = scale / prev;
+  atPeekZoom.x = cx - (cx - atPeekZoom.x) * k;
+  atPeekZoom.y = cy - (cy - atPeekZoom.y) * k;
+  atPeekZoom.scale = scale;
+  _atApplyPeekZoom();
+}
+
+/**
+ * @brief Close the floating frame preview
+ * @return none
+ */
+function _atCloseFramePeek() {
+  atPeekOpen = false;
+  _atResetPeekZoom();
+  document.getElementById("atFramePeek")?.classList.add("hidden");
+}
+
+function _atPeekHostWin() {
+  try {
+    if (window.top && window.top.document) {
+      return window.top;
+    }
+  } catch (_) {}
+  return window;
+}
+
+function _atFitPeekToImage(peek, img) {
+  const hostWin = _atPeekHostWin();
+  const nw = img.naturalWidth || 1;
+  const nh = img.naturalHeight || 1;
+  const headerH = peek.querySelector(".at-frame-peek-head")?.offsetHeight || 34;
+  const maxW = Math.min(1080, hostWin.innerWidth - 24);
+  const maxH = hostWin.innerHeight - 24;
+  let w = atPeekSize?.w || maxW;
+  w = Math.min(w, maxW);
+  let h = headerH + Math.round(w * (nh / nw));
+  if (h > maxH) {
+    h = maxH;
+    w = Math.max(280, Math.round((h - headerH) * (nw / nh)));
+  }
+  peek.style.width = `${w}px`;
+  peek.style.height = `${h}px`;
+}
+
+function _atApplyFramePeekBox(peek) {
+  if (atPeekSize) {
+    peek.style.width = `${atPeekSize.w}px`;
+    peek.style.height = `${atPeekSize.h}px`;
+  } else {
+    peek.style.width = `${Math.min(1080, _atPeekHostWin().innerWidth - 24)}px`;
+    peek.style.height = "auto";
+  }
+  if (atPeekPos) {
+    peek.style.left = `${atPeekPos.left}px`;
+    peek.style.top = `${atPeekPos.top}px`;
+    peek.style.right = "auto";
+  } else {
+    peek.style.top = "12px";
+    peek.style.right = "12px";
+    peek.style.left = "auto";
+  }
+}
+
+/**
+ * @brief Bind window drag, pinch-zoom and image pan (once)
+ * @return none
+ */
+function _atBindFramePeekDrag() {
+  const peek = document.getElementById("atFramePeek");
+  const view = document.getElementById("atFramePeekView");
+  if (!peek || peek.dataset.dragBound === "1") {
+    return;
+  }
+  peek.dataset.dragBound = "1";
+  peek.querySelector("#atFramePeekClose")?.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    _atCloseFramePeek();
+  });
+  peek.querySelector("#atFramePeekHead")?.addEventListener("pointerdown", (ev) => {
+    if (ev.button != null && ev.button !== 0) {
+      return;
+    }
+    if (ev.target.closest("#atFramePeekClose")) {
+      return;
+    }
+    const rect = peek.getBoundingClientRect();
+    const dx = ev.clientX - rect.left;
+    const dy = ev.clientY - rect.top;
+    peek.classList.add("is-dragging");
+    const onMove = (mv) => {
+      const hostWin = _atPeekHostWin();
+      const left = Math.max(8, Math.min(hostWin.innerWidth - 80, mv.clientX - dx));
+      const top = Math.max(8, Math.min(hostWin.innerHeight - 40, mv.clientY - dy));
+      peek.style.left = `${left}px`;
+      peek.style.top = `${top}px`;
+      peek.style.right = "auto";
+      atPeekPos = { left, top };
+    };
+    const onUp = () => {
+      peek.classList.remove("is-dragging");
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  });
+  if (!view) {
+    return;
+  }
+  const pointers = new Map();
+  let pinchStart = null;
+  view.addEventListener("wheel", (ev) => {
+    ev.preventDefault();
+    if (ev.ctrlKey || ev.metaKey) {
+      const factor = Math.exp(-ev.deltaY * 0.012);
+      _atZoomPeekAt(view, ev.clientX, ev.clientY, atPeekZoom.scale * factor);
+      return;
+    }
+    atPeekZoom.x -= ev.deltaX;
+    atPeekZoom.y -= ev.deltaY;
+    _atApplyPeekZoom();
+  }, { passive: false });
+  view.addEventListener("pointerdown", (ev) => {
+    if (ev.button != null && ev.button !== 0 && ev.pointerType === "mouse") {
+      return;
+    }
+    view.setPointerCapture?.(ev.pointerId);
+    pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    if (pointers.size === 2) {
+      const pts = [...pointers.values()];
+      pinchStart = {
+        dist: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y),
+        scale: atPeekZoom.scale,
+        cx: (pts[0].x + pts[1].x) / 2,
+        cy: (pts[0].y + pts[1].y) / 2,
+      };
+    } else {
+      view.classList.add("is-panning");
+    }
+  });
+  view.addEventListener("pointermove", (ev) => {
+    if (!pointers.has(ev.pointerId)) {
+      return;
+    }
+    const prev = pointers.get(ev.pointerId);
+    pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    if (pointers.size >= 2 && pinchStart) {
+      const pts = [...pointers.values()];
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      const cx = (pts[0].x + pts[1].x) / 2;
+      const cy = (pts[0].y + pts[1].y) / 2;
+      if (pinchStart.dist > 8) {
+        _atZoomPeekAt(view, cx, cy, pinchStart.scale * (dist / pinchStart.dist));
+      }
+      atPeekZoom.x += cx - pinchStart.cx;
+      atPeekZoom.y += cy - pinchStart.cy;
+      pinchStart.cx = cx;
+      pinchStart.cy = cy;
+      _atApplyPeekZoom();
+      return;
+    }
+    atPeekZoom.x += ev.clientX - prev.x;
+    atPeekZoom.y += ev.clientY - prev.y;
+    _atApplyPeekZoom();
+  });
+  const endPtr = (ev) => {
+    pointers.delete(ev.pointerId);
+    if (pointers.size < 2) {
+      pinchStart = null;
+    }
+    if (!pointers.size) {
+      view.classList.remove("is-panning");
+    }
+  };
+  view.addEventListener("pointerup", endPtr);
+  view.addEventListener("pointercancel", endPtr);
+  peek.querySelector("#atFramePeekResize")?.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (ev.button != null && ev.button !== 0) {
+      return;
+    }
+    const rect = peek.getBoundingClientRect();
+    const right = rect.right;
+    const top = rect.top;
+    const imgEl = peek.querySelector("#atFramePeekImg");
+    const headerH = peek.querySelector(".at-frame-peek-head")?.offsetHeight || 34;
+    const nw = imgEl?.naturalWidth || rect.width;
+    const nh = imgEl?.naturalHeight || Math.max(1, rect.height - headerH);
+    const ratio = nw / nh;
+    peek.classList.add("is-resizing");
+    const hostWin = _atPeekHostWin();
+    const onMove = (mv) => {
+      const minW = 280;
+      const maxW = hostWin.innerWidth - 16;
+      const maxH = hostWin.innerHeight - 16;
+      let w = Math.max(minW, Math.min(maxW, right - mv.clientX));
+      let h = headerH + Math.round(w / ratio);
+      if (h > maxH) {
+        h = maxH;
+        w = Math.max(minW, Math.round((h - headerH) * ratio));
+      }
+      let left = right - w;
+      if (left < 8) {
+        w = right - 8;
+        left = 8;
+        h = headerH + Math.round(w / ratio);
+      }
+      peek.style.width = `${w}px`;
+      peek.style.height = `${h}px`;
+      peek.style.left = `${left}px`;
+      peek.style.top = `${top}px`;
+      peek.style.right = "auto";
+      atPeekSize = { w, h };
+      atPeekPos = { left, top };
+      _atApplyPeekZoom();
+    };
+    const onUp = () => {
+      peek.classList.remove("is-resizing");
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  });
+}
+
+/**
+ * @brief Open or update the floating frame preview at top-right
+ * @param[in] src image url
+ * @param[in] title caption
+ * @return none
+ */
+function _atOpenFramePeek(src, title) {
+  const peek = document.getElementById("atFramePeek");
+  const img = document.getElementById("atFramePeekImg");
+  const cap = document.getElementById("atFramePeekTitle");
+  if (!peek || !img || !src) {
+    return;
+  }
+  _atBindFramePeekDrag();
+  _atResetPeekZoom();
+  const applyFit = () => {
+    if (img.naturalWidth) {
+      _atFitPeekToImage(peek, img);
+    }
+  };
+  img.onload = applyFit;
+  img.src = src;
+  if (cap) {
+    cap.textContent = title || "过程截图";
+  }
+  peek.classList.remove("hidden");
+  _atApplyFramePeekBox(peek);
+  if (img.complete && img.naturalWidth) {
+    applyFit();
+  }
+  atPeekOpen = true;
+}
+
+/**
+ * @brief If peek is open, refresh it to the current selected frame
+ * @param[in] frames report frames
+ * @return none
+ */
+function _atSyncFramePeek(frames) {
+  if (!atPeekOpen) {
+    return;
+  }
+  const frame = (frames || [])[atReportFrameIndex];
+  const src = frame?.image || frame?.thumb || "";
+  if (!src) {
+    return;
+  }
+  _atOpenFramePeek(src, `${frame.time || ""} · ${_atPhaseLabel(frame.phase)}`);
+}
+
+function _atBindReportDetail(rep, savedId, frames) {
+  rep.querySelector("#atReportBackList")?.addEventListener("click", () => {
+    atReportCycleNo = null;
+    atReportFrameIndex = 0;
+    _atCloseFramePeek();
+    _atRenderReportPlayer(savedId);
+  });
+  rep.querySelector("#atPrevFrame")?.addEventListener("click", () => {
+    atReportFrameIndex = Math.max(0, atReportFrameIndex - 1);
+    _atRenderReportPlayer(savedId);
+  });
+  rep.querySelector("#atNextFrame")?.addEventListener("click", () => {
+    atReportFrameIndex = Math.min(Math.max(0, frames.length - 1), atReportFrameIndex + 1);
+    _atRenderReportPlayer(savedId);
+  });
+  rep.querySelectorAll("[data-frame-idx]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      atReportFrameIndex = Number(btn.getAttribute("data-frame-idx") || 0);
+      const frame = frames[atReportFrameIndex];
+      const src = frame?.image || frame?.thumb || "";
+      if (src) {
+        _atOpenFramePeek(src, `${frame.time || ""} · ${_atPhaseLabel(frame.phase)}`);
+      }
+      _atRenderReportPlayer(savedId);
+    });
+  });
+}
+
+function _atRenderReportList(rep, savedId, stats) {
+  const cycles = atLastReport.cycles || [];
+  const rows = (atReportOnlyFailures
+    ? cycles.filter((cycle) => cycle.failed || cycle.status === "fail")
+    : cycles);
+  const body = rows.map((cycle) => {
+    const snap = _atCycleSnapshot(cycle);
+    const verdict = _atCycleVerdict(cycle);
+    const cls = verdict.kind === "fail" ? "is-fail" : verdict.kind === "paused" ? "is-pause" : "is-pass";
+    return `<tr class="${cls}" data-report-case="${escapeAttr(String(cycle.no))}">` +
+      `<td class="at-case-no">${cycle.no}</td>` +
+      `<td>${_atFlowCellHtml(snap.flow, snap.family)}</td>` +
+      `<td class="at-construct-cell">${_atCycleConstructHtml(cycle)}</td>` +
+      `<td class="at-result-cell">${_atVerdictBadgeHtml(verdict)}${verdict.text ? `<div class="at-fail-text">${escapeHtml(verdict.text)}</div>` : ""}</td>` +
+      `</tr>`;
+  }).join("");
+  const empty = cycles.length
+    ? (rows.length ? "" : `<tr><td colspan="4" class="hint">没有失败用例。</td></tr>`)
+    : `<tr><td colspan="4" class="hint">暂无用例。</td></tr>`;
+  rep.innerHTML =
+    `<h3>测试报告 · ${escapeHtml(atLastReport.title || savedId || "")}</h3>` +
+    _atReportStatsHtml(stats) +
+    `<p class="hint">点击表格行查看该用例详情。</p>` +
+    `<div class="at-player-head"><div class="at-player-meta">用例列表</div>` +
+    `<div class="at-player-controls">` +
+      `<button type="button" class="btn btn-ghost" id="atToggleFailures">${atReportOnlyFailures ? "显示全部" : "仅看失败"}</button>` +
+    `</div></div>` +
+    `<div class="at-report-table-wrap"><table class="at-report-table">` +
+      `<thead><tr><th>#</th><th>家庭流向</th><th>构造工况</th><th>结果</th></tr></thead>` +
+      `<tbody>${body || empty}</tbody>` +
+    `</table></div>`;
+  _atBindReportList(rep, savedId);
+}
+
+function _atFlowCellHtml(flow, family) {
+  if (!flow && !(family || []).length) {
+    return `<span class="hint">—</span>`;
+  }
+  return `<div class="at-flow-cell">${_atFlowSchematicHtml(flow, family)}</div>`;
+}
+
+function _atRenderReportDetail(rep, savedId, cycle) {
+  const frames = _atReportFrameSet();
+  const verdict = _atCycleVerdict(cycle);
+  const badge = _atVerdictBadgeHtml(verdict);
+  const head =
+    `<h3>用例 ${cycle.no} ${badge}</h3>` +
+    (verdict.text ? `<p class="at-fail-text">${escapeHtml(verdict.text)}</p>` : "") +
+    `<div class="at-player-head"><div class="at-player-meta">${_atCycleConstructHtml(cycle)}</div>` +
+    `<div class="at-player-controls">` +
+      `<button type="button" class="btn btn-ghost" id="atReportBackList">返回列表</button>` +
+      (frames.length
+        ? `<button type="button" class="btn btn-ghost" id="atPrevFrame">上一帧</button>` +
+          `<button type="button" class="btn btn-ghost" id="atNextFrame">下一帧</button>` +
+          `<span class="hint">${Math.min(atReportFrameIndex + 1, frames.length)}/${frames.length}</span>`
+        : "") +
+    `</div></div>`;
+  if (!frames.length) {
+    const snap = _atCycleSnapshot(cycle);
+    rep.innerHTML = head +
+      `<p class="hint">这条用例没有录播截图，下面是当时的检查结果。</p>` +
+      _atDeviceStateTable(snap.family) +
+      ((cycle.issued || []).length ? _atIssuedTable(cycle.issued) : "") +
+      ((cycle.results || []).length ? _atCheckerTableHtml(cycle.results) : "");
+    _atBindReportDetail(rep, savedId, frames);
+    return;
+  }
+  atReportFrameIndex = Math.max(0, Math.min(atReportFrameIndex, frames.length - 1));
+  const frame = frames[atReportFrameIndex];
+  rep.innerHTML = head +
+    `<div class="at-detail-stack">` +
+      `<section class="at-detail-level at-detail-frames">` +
+        `<div class="at-detail-level-kicker">1 · 中间过程态</div>` +
+        `<p class="hint at-frame-hint">点击帧条放大预览。双指捏合/滑动看图，拖标题栏移动窗口，左下角拖拽缩放窗口。</p>` +
+        `<div class="at-player-strip">` +
+          frames.map((item, idx) => `<button type="button" class="at-player-thumb ${idx === atReportFrameIndex ? "active" : ""} ${item.failed || item.emphasis === "fail" ? "is-fail" : ""}" data-frame-idx="${idx}" title="点击放大预览">` +
+            (item.thumb || item.image ? `<img src="${escapeAttr(item.thumb || item.image)}" alt="${escapeAttr(item.title || item.phase)}" />` : `<span class="at-thumb-ph">${escapeHtml(_atPhaseLabel(item.phase))}</span>`) +
+            `<span>${escapeHtml(item.time || "")} · ${escapeHtml(_atPhaseLabel(item.phase))}</span></button>`).join("") +
+        `</div>` +
+      `</section>` +
+      `<section class="at-detail-level at-detail-note ${frame.failed || frame.emphasis === "fail" ? "is-fail" : ""}">` +
+        `<div class="at-detail-level-kicker">2 · 说明</div>` +
+        `<div class="at-player-info"><div class="at-player-title">${escapeHtml(frame.title || _atPhaseLabel(frame.phase))} · ${escapeHtml(frame.time || "")}${frame.failed || frame.emphasis === "fail" ? ' <span class="at-badge at-fail">失败</span>' : ""}</div>` +
+        _atPlayerStepHtml(frame) +
+        `</div>` +
+      `</section>` +
+    `</div>`;
+  _atBindReportDetail(rep, savedId, frames);
+  _atSyncFramePeek(frames);
+}
+
+function _atRenderReportPlayer(savedId) {
+  const rep = document.getElementById("autoTestReport");
+  if (!rep || !atLastReport) {
+    return;
+  }
+  atLastReport = _atHydrateReport(atLastReport);
+  const stats = _atReportCaseStats(atLastReport);
+  const cycles = atLastReport.cycles || [];
+  rep.classList.remove("hidden");
+  if (atReportCycleNo != null) {
+    const cycle = _atReportCycleByNo(atReportCycleNo);
+    if (cycle) {
+      _atRenderReportDetail(rep, savedId, cycle);
+      return;
+    }
+    atReportCycleNo = null;
+  }
+  _atRenderReportList(rep, savedId, stats);
+}
+
+function _atEvaluateAssignmentResult(home, assignment, expect, issuedItem) {
+  const dev = (home?.devices || []).find((item) => item.uid === assignment.uid);
+  if (!dev) {
+    return null;
+  }
+  const owner = classifyOwnerWorkModel(dev);
+  const theory = owner ? owner.label : "—";
+  const act = dev.ownerActual;
+  const actLabel = act ? act.label : "—";
+  const actOrder = _atStateLabel(act);
+  const actPower = act ? act.cmdPowerW : null;
+  const target = assignment.target;
+  const hitTarget = theory !== "—" && theory === target;
+  const ex = expect.byUid[dev.uid];
+  let masterPass = null;
+  let masterNote = "";
+  let expOrder = "—";
+  let expPower = null;
+  let expBand = null;
+  if (!ex) {
+    masterNote = "无期望模型（未读到上报态）";
+  } else if (!ex.determinable) {
+    masterNote = ex.why;
+    expOrder = ex.order;
+    expPower = ex.powerW;
+    expBand = ex.band;
+  } else {
+    expOrder = ex.order;
+    expPower = ex.powerW;
+    expBand = ex.band;
+    const dirOk = actOrder === ex.order;
+    const powOk = actPower != null && actPower >= ex.band[0] && actPower <= ex.band[1];
+    masterPass = dirOk && powOk;
+    masterNote =
+      `期望 ${ex.order}/${ex.powerW}W(容 ${ex.band[0]}~${ex.band[1]}) · 实际 ${actOrder}/${actPower == null ? "—" : actPower}W` +
+      (dirOk ? "" : " · 方向不符") +
+      (powOk || !dirOk ? "" : " · 功率越界") +
+      " · " +
+      ex.why;
+  }
+  const result = {
+    device: assignment.device,
+    deviceId: assignment.deviceId,
+    params: assignment.params,
+    target,
+    coverageKey: assignment.coverageKey,
+    theory,
+    actLabel,
+    actOrder,
+    actPower,
+    hitTarget,
+    expOrder,
+    expPower,
+    expBand,
+    masterPass,
+    masterNote,
+    pass: hitTarget && masterPass !== false,
+    error: issuedItem?.err || null,
+  };
+  result.failTags = _atFailTags(result);
+  result.failReason = _atFailReason({ ...result, failReason: "" });
+  return result;
+}
+
+function _atEvaluateComboResult(home, cycle, expect) {
+  const issuedMap = new Map((cycle.issued || []).map((item) => [item.uid, item]));
+  return _atCycleAssignments(cycle)
+    .map((assignment) => _atEvaluateAssignmentResult(home, assignment, expect, issuedMap.get(assignment.uid)))
+    .filter(Boolean);
+}
+
+async function runAutoTest() {
+  if (atRunning) return;
+  const home = activeHome();
+  if (!home) {
+    toast("请先选择家庭", "error");
+    return;
+  }
+  const selectedUids = _atEnsureSelected(home);
+  if (!selectedUids.length) {
+    toast("请至少选择一台设备", "error");
+    return;
+  }
+  const execPlan = buildAutoExecutionPlan(home, selectedUids, atSelectedTargets);
+  _atEnsureCasePicks(execPlan.cycles || []);
+  const picked = _atPickedCycles(execPlan.cycles || []);
+  if (!picked.length) {
+    toast("没有可执行的组合用例，请勾选设备、工况徽章，并在列表里勾选要跑的用例", "error");
+    return;
+  }
+  const settle = Math.max(4, Number(document.getElementById("atSettle").value || 15));
+  const restore = document.getElementById("atRestore").checked;
+  const totalCycleN = Number.isFinite(execPlan.totalCycles) ? execPlan.totalCycles : execPlan.cycles.length;
+  const truncTxt = execPlan.truncated ? `；总组合 ${totalCycleN} 条，当前仅加载前 ${execPlan.cycles.length} 条` : "";
+  if (!confirm(`将执行 ${picked.length}/${execPlan.cycles.length} 条组合用例（${selectedUids.length} 台设备${truncTxt}）；每条用例按检查→快照→下发→运行拍照→checker→回收执行，并真实改设备参数。确认开始？`)) {
+    return;
+  }
+  atRunning = true;
+  atPauseRequested = false;
+  atActiveReportId = null;
+  atShowResults = true;
+  atLastReport = null;
+  atReportFrameIndex = 0;
+  atReportOnlyFailures = false;
+  atReportCycleNo = null;
+  atReplayOpen = false;
+  _atSetRunButtons();
+  setAtInnerTab("run");
+  document.getElementById("autoTestReport")?.classList.add("hidden");
+  const tl = document.getElementById("autoTestTimeline");
+  tl.classList.remove("hidden");
+  tl.innerHTML = `<div class="at-scope-head at-timeline-head"><span class="at-scope-title">用例执行列表</span><span class="hint">完成后自动折叠，点标题可展开</span></div>`;
+  _atBindTimelineFold(tl);
+  _atSetProg(0, picked.length, "开始…");
+
+  const fieldsToRestore = ["work_mode", "backup_soc", "output_power_limit", "inverter_input_power_limit", "regulation_grid_export_p_limit"];
+  const orig = {};
+  for (const dev of home.devices || []) {
+    orig[dev.uid] = {};
+    for (const key of fieldsToRestore) {
+      orig[dev.uid][key] = dev.values?.[key] != null ? String(dev.values[key]) : "";
+    }
+  }
+
+  const cycles = [];
+  let paused = false;
+  try {
+    for (let idx = 0; idx < picked.length; idx++) {
+      const step = picked[idx];
+      if (atPauseRequested) {
+        paused = true;
+        break;
+      }
+      const cycle = {
+        ...step,
+        settle,
+        tIssue: null,
+        tObserve: null,
+        issued: [],
+        results: [],
+        frames: [],
+        failed: false,
+        status: "running",
+        step: "check",
+      };
+      cycles.push(cycle);
+      renderCycleCard(cycle, "running");
+      _atSetProg(idx, picked.length, `用例 ${cycle.no}（${idx + 1}/${picked.length}）· ${_atCycleLabel(cycle)}`);
+
+      await _atReadDevices(home, _atCycleDevices(home, cycle));
+      cycle.step = "before";
+      cycle.tIssue = _nowHMS();
+      await _atCaptureFrame(home, cycle, "before", {
+        title: "1. 开始前 · 家庭流向与设备状态",
+        readScope: "family",
+        note: "下发前家庭各端口流向，以及各设备当前工况。",
+      });
+
+      cycle.step = "issue";
+      await Promise.all(_atCycleAssignments(cycle).map(async (assignment) => {
+        const dev = (home.devices || []).find((item) => item.uid === assignment.uid);
+        if (!dev) return;
+        for (const [k, v] of Object.entries(assignment.params || {})) {
+          dev.drafts[k] = String(v);
+        }
+        let ok = true;
+        let err = null;
+        if (Object.keys(assignment.params || {}).length) {
+          try {
+            ok = await issueDevice(home, dev, { batch: true });
+            if (!ok) err = dev.error || "下发失败";
+          } catch (e) {
+            ok = false;
+            err = String(e.message || e);
+          }
+        }
+        cycle.issued.push({
+          device: assignment.device,
+          deviceId: assignment.deviceId,
+          uid: assignment.uid,
+          target: assignment.target,
+          params: { ...(assignment.params || {}) },
+          from: Object.fromEntries(
+            Object.keys(assignment.params || {}).map((key) => [key, orig[assignment.uid]?.[key] ?? ""])
+          ),
+          ok,
+          err,
+        });
+      }));
+      renderCycleCard(cycle, "running");
+      await _atCaptureFrame(home, cycle, "issued", {
+        title: "2. 下发参数",
+        readScope: "family",
+        issued: cycle.issued.map((item) => ({ ...item })),
+        note: cycle.issued.some((item) => Object.keys(item.params || {}).length)
+          ? "已按下表参数下发到各设备。"
+          : "各设备已是目标工况，无需改参。",
+      });
+
+      cycle.step = "runtime";
+      const midDelayMs = Math.max(1000, Math.floor((settle * 1000) / 2));
+      _atSetProg(idx, picked.length, `用例 ${cycle.no}（${idx + 1}/${picked.length}）· 等待运行时态`);
+      await _atSleep(midDelayMs);
+      await _atCaptureFrame(home, cycle, "mid", {
+        title: "3. 运行中 · 家庭流向",
+        readScope: "family",
+        note: atPauseRequested ? "已收到暂停，提前进入检查。" : "观察窗口中点的家庭流向和设备状态。",
+      });
+      if (!atPauseRequested) {
+        await _atSleep(Math.max(0, settle * 1000 - midDelayMs));
+      }
+
+      cycle.step = "checker";
+      cycle.tObserve = _nowHMS();
+      await _atReadDevices(home, home.devices || []);
+      const expect = computeMasterExpect(home, _atMasterOpts());
+      cycle.chg2Suppressed = expect.chg2Suppressed;
+      cycle.results = _atEvaluateComboResult(home, cycle, expect);
+      cycle.failed = cycle.results.some((item) => !item.pass || !!item.error);
+      await _atCaptureFrame(home, cycle, "observe", {
+        title: cycle.failed ? "4. 检查结果 · 失败" : "4. 检查结果 · 通过",
+        note: cycle.failed
+          ? `${_atFailLines(cycle.results).length}/${cycle.results.length} 台失败`
+          : `${cycle.results.length} 台通过`,
+        checkerState: cycle.results,
+        emphasis: cycle.failed ? "fail" : "",
+      });
+      if (cycle.failed) {
+        await _atCaptureFrame(home, cycle, "fail-focus", {
+          title: "失败回溯",
+          note: `${_atFailLines(cycle.results).length}/${cycle.results.length} 台失败`,
+          checkerState: cycle.results,
+          emphasis: "fail",
+        });
+      }
+
+      cycle.step = "collect";
+      if (restore) {
+        for (const assignment of _atCycleAssignments(cycle)) {
+          const dev = (home.devices || []).find((item) => item.uid === assignment.uid);
+          if (!dev || !Object.keys(assignment.params || {}).length) {
+            continue;
+          }
+          for (const key of fieldsToRestore) {
+            dev.drafts[key] = orig[assignment.uid]?.[key] || "";
+          }
+          try {
+            await issueDevice(home, dev, { batch: true });
+          } catch (_) {}
+        }
+        await _atCaptureFrame(home, cycle, "restore", {
+          title: "5. 结果回收",
+          readScope: "family",
+          issued: _atCycleAssignments(cycle).map((assignment) => ({
+            device: assignment.device,
+            target: assignment.target,
+            params: orig[assignment.uid] || {},
+            from: { ...(assignment.params || {}) },
+            ok: true,
+          })),
+          note: "已恢复本用例涉及设备的原始参数。",
+        });
+      }
+
+      cycle.step = "done";
+      cycle.status = cycle.failed ? "fail" : "done";
+      renderCycleCard(cycle, cycle.failed ? "done fail" : "done");
+      _atSetProg(idx + 1, picked.length, `用例 ${cycle.no}（${idx + 1}/${picked.length}）完成`);
+      if (atPauseRequested) {
+        paused = true;
+        break;
+      }
+    }
+  } finally {
+    atRunning = false;
+    atPauseRequested = false;
+    _atSetRunButtons();
+  }
+  await finishAutoTest(home, cycles, settle, {
+    paused,
+    planned: picked.length,
+  });
+}
+
+async function finishAutoTest(home, cycles, settle, extra = {}) {
+  const paused = !!extra.paused;
+  const planned = extra.planned != null ? extra.planned : cycles.length;
+  const flat = cycles.flatMap((c) => c.results || []);
+  const pass = flat.filter((r) => r.pass).length;
+  const fail = flat.length - pass;
+  const l1ok = flat.filter((r) => r.hitTarget).length;
+  const l2j = flat.filter((r) => r.masterPass !== null);
+  const l2ok = l2j.filter((r) => r.masterPass).length;
+  const status = paused ? "paused" : "done";
   const md = _atReportMd(home, cycles, settle);
   const csv = _atReportCsv(cycles);
-  let savedId = null;
+  let savedId = atActiveReportId || null;
+  let reportJson = null;
   try {
+    reportJson = _atReportPayload(home, cycles, settle, savedId, { status, planned, reportId: savedId });
     const res = await fetch("/api/report/save", {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        id: savedId,
         name: `${home.homeId || "home"}`,
-        title: `自动回归 · ${home.name || home.homeId}`,
-        summary: `${cycles.length} 周期 · ${flat.length} 组 · 通过 ${pass} · 失败 ${fail}`,
-        total: flat.length, passed: pass, failed: fail, markdown: md, csv,
+        title: `${paused ? "自动回归(暂停)" : "自动回归"} · ${home.name || home.homeId}`,
+        homeId: home.homeId || home.uid || "",
+        homeName: home.name || "",
+        summary: `${paused ? "暂停" : "完成"} ${cycles.length}/${planned} 用例 · ${flat.length} 组 · 通过 ${pass} · 失败 ${fail}`,
+        status,
+        planned,
+        done: cycles.length,
+        total: flat.length,
+        passed: pass,
+        failed: fail,
+        markdown: md,
+        csv,
+        reportJson: _atPersistableReport(reportJson),
       }),
     });
     const j = await res.json();
     savedId = j.id;
+    atActiveReportId = savedId;
+    if (savedId) {
+      try {
+        const loaded = await fetch(`/api/report?id=${encodeURIComponent(savedId)}&fmt=json`);
+        const lj = await loaded.json();
+        if (lj.report) {
+          reportJson = lj.report;
+        }
+      } catch (_) {}
+    }
   } catch (e) {
     toast(`报告保存失败：${e.message || e}`, "error");
   }
-  const rep = document.getElementById("autoTestReport");
-  rep.classList.remove("hidden");
-  rep.innerHTML =
-    `<h3>测试报告 · ${cycles.length} 周期 · 综合通过 ${pass} / ${flat.length}${fail ? ` · <span style="color:#b91c1c">失败 ${fail}</span>` : ""}</h3>` +
-    `<p class="hint">L1 从机判定（读回态命中目标态）：<b>${l1ok}/${flat.length}</b> · L2 主机决策（分配==期望）：<b>${l2ok}/${l2j.length}</b> 可硬判，其余 ${flat.length - l2j.length} 组依赖能量守恒/未采集量仅参考。</p>` +
-    (savedId ? `<div class="at-report-actions"><a class="btn btn-ghost" href="/api/report?id=${encodeURIComponent(savedId)}&fmt=csv">下载 CSV</a><a class="btn btn-ghost" href="/api/report?id=${encodeURIComponent(savedId)}&fmt=md" target="_blank">查看 Markdown</a></div>` : "") +
-    `<p class="hint">明细见上方时间轴；每个周期的下发时刻/参数/两层判定都已按时间记录。</p>`;
-  document.getElementById("autoTestProgress").classList.add("hidden");
-  toast(`测试完成：${cycles.length} 周期 · 通过 ${pass}/${flat.length}`, fail ? "error" : "ok");
+  atLastReport = reportJson || _atReportPayload(home, cycles, settle, savedId, { status, planned });
+  atLastReport.id = savedId;
+  atReportCycleNo = null;
+  atReportFrameIndex = 0;
+  document.getElementById("autoTestProgress")?.classList.add("hidden");
+  setAtInnerTab("report");
+  _atRenderReportPlayer(savedId);
+  toast(
+    paused
+      ? `已暂停并保存：${cycles.length}/${planned} 用例 · 通过 ${pass}/${flat.length}。可在「报告」里回放`
+      : `测试完成：${cycles.length} 用例 · 通过 ${pass}/${flat.length}`,
+    fail ? "error" : "ok"
+  );
 }
 
 function openLoginDialog(forceHost) {
@@ -8599,10 +11679,23 @@ function bindEvents() {
   document.getElementById("btnEmptyAdd").addEventListener("click", () => openHomeDialog(null));
   document.getElementById("btnLogin").addEventListener("click", openLoginMgr);
   document.getElementById("btnLoginMgrBack")?.addEventListener("click", closeLoginMgr);
-  document.getElementById("btnAutoTest")?.addEventListener("click", openAutoTest);
-  document.getElementById("btnAutoTestBack")?.addEventListener("click", closeAutoTest);
-  document.getElementById("btnAutoTestReload")?.addEventListener("click", () => { atShowResults = false; renderAutoTest(); });
+  document.getElementById("autoInnerTabs")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-at-tab]");
+    if (!btn) return;
+    setAtInnerTab(btn.getAttribute("data-at-tab"));
+  });
+  document.getElementById("btnAutoTestReload")?.addEventListener("click", () => {
+    if (atRunning) {
+      toast("测试进行中，请先暂停", "error");
+      return;
+    }
+    atShowResults = false;
+    atReplayOpen = false;
+    setAtInnerTab("run");
+    renderAutoRun();
+  });
   document.getElementById("btnAutoTestRun")?.addEventListener("click", () => runAutoTest());
+  document.getElementById("btnAutoTestPause")?.addEventListener("click", () => pauseAutoTest());
   document.getElementById("btnLoginMgrAuto")?.addEventListener("click", async () => {
     const btn = document.getElementById("btnLoginMgrAuto");
     const prev = btn.textContent;
@@ -9176,8 +12269,18 @@ async function init() {
   window.addEventListener("message", (ev) => {
     const data = ev && ev.data;
     if (!data || typeof data !== "object") return;
+    if (ev.origin && ev.origin !== window.location.origin) return;
     if (data.type === "caselib-open-login-mgr") {
       openLoginMgr();
+    }
+    if (data.type === "caselib-close-login-mgr") {
+      if (uiRoute === "loginMgr") {
+        uiRoute = "home";
+        render();
+      }
+    }
+    if (data.type === "caselib-set-shell") {
+      applyUiShell(data.shell);
     }
   });
   bindEvents();

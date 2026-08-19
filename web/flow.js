@@ -262,10 +262,10 @@ function flowBmsSvg(bx, by, bw, bh, mode, wattsLabel, limLabel, capLabel = "") {
 /** Build per-device geometry + power from live shadow values. */
 function buildDeviceFlowGeo(home, device, i, layout) {
   const v = device.values || {};
-  const pv = Math.max(0, flowNum(v.pv_power_total));
+  const pv = typeof _ownerPvW === "function" ? _ownerPvW(device) : Math.max(0, flowNum(v.pv_power_total));
   const grid = flowNum(v.grid_port_power ?? v.inverter_output_power);
   const bat = flowNum(v.battery_power);
-  const offgrid = flowNum(v.offgrid1_export_power ?? v.battery_charging_power_grid);
+  const offgrid = typeof _ownerBypassW === "function" ? _ownerBypassW(device) : flowNum(v.offgrid1_export_power ?? v.battery_charging_power_grid);
   const soc = flowNum(v.current_soc ?? v.main_soc);
   const backup = flowNum(v.backup_soc);
   const batCapRaw = v.battery_capacity;
@@ -1786,7 +1786,7 @@ function renderHomeEnergyFlow(home) {
       </span>
     </div>
     ${caption ? `<div class="flow-cap">${flowEsc(caption)}</div>` : ""}
-    <div class="flow-svg-wrap" title="从端子圆点拖到端口接线 · 卡片右下角拖拽缩放（全部同步）· 双击恢复 · 框选端子可一起移动 · 点选连线后按 Delete 删除">
+    <div class="flow-svg-wrap" title="双指捏合放大缩小画布 · 从端子圆点拖到端口接线 · 卡片右下角拖拽缩放（全部同步）· 双击恢复 · 框选端子可一起移动 · 点选连线后按 Delete 删除">
       <div class="flow-legend-row">
         <span><i style="background:#eab308"></i>PV→各机</span>
         <span><i style="background:#a855f7"></i>各机→电网(放)</span>

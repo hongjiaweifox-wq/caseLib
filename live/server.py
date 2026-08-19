@@ -7,6 +7,7 @@ Usage (from repo root or this folder):
   # http://<局域网IP>:5178  (同网段可访问)
 """
 
+import base64
 import csv
 import json
 import os
@@ -25,7 +26,7 @@ from http.server import SimpleHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 # checker/ 固件运行逻辑层（层3）在 caseLib 顶层，跨服务共享；此处按 /checker/ 前缀桥接。
@@ -264,6 +265,127 @@ def _read_json(handler: SimpleHTTPRequestHandler) -> Dict[str, Any]:
         return json.loads(raw.decode("utf-8"))
     except Exception:
         return {}
+
+
+def _report_home_id(stem, meta=None):
+    hid = str((meta or {}).get("homeId") or "").strip()
+    if hid:
+        return hid
+    if "_" in str(stem or ""):
+        return str(stem).split("_", 1)[1]
+    return ""
+
+
+def _strip_report_images(obj):
+    if isinstance(obj, dict):
+        out = {}
+        for key, value in obj.items():
+            if key in ("image", "thumb") and isinstance(value, str) and value.startswith("data:"):
+                continue
+            out[key] = _strip_report_images(value)
+        return out
+    if isinstance(obj, list):
+        return [_strip_report_images(item) for item in obj]
+    return obj
+
+
+def _decode_data_url(data_url: str) -> Optional[Tuple[bytes, str]]:
+    """Parse data:[mime];base64,... → (bytes, mime)."""
+    if not isinstance(data_url, str) or not data_url.startswith("data:"):
+        return None
+    try:
+        header, b64 = data_url.split(",", 1)
+        mime = "image/jpeg"
+        if ";" in header:
+            mime = header[5:].split(";", 1)[0] or mime
+        elif header.startswith("data:") and len(header) > 5:
+            mime = header[5:] or mime
+        return base64.b64decode(b64), mime
+    except Exception:
+        return None
+
+
+def _mime_to_ext(mime: str) -> str:
+    m = (mime or "").lower()
+    if "png" in m:
+        return ".png"
+    if "webp" in m:
+        return ".webp"
+    if "gif" in m:
+        return ".gif"
+    return ".jpg"
+
+
+def _persist_report_images(rid: str, payload: Any) -> Any:
+    """Write frame JPEG data-URLs under reports/{rid}/frames/ and rewrite to /api/report/asset URLs."""
+    if not isinstance(payload, (dict, list)):
+        return payload
+    frames_dir = REPORTS_DIR / rid / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    seq = {"n": 0}
+
+    def save_blob(data_url: str, stem: str) -> Optional[str]:
+        decoded = _decode_data_url(data_url)
+        if not decoded:
+            return None
+        raw, mime = decoded
+        name = f"{stem}{_mime_to_ext(mime)}"
+        try:
+            (frames_dir / name).write_bytes(raw)
+        except Exception as exc:
+            print(f"[caseLib] report frame write failed: {exc}", file=sys.stderr)
+            return None
+        return f"/api/report/asset?id={quote(rid)}&file={quote(name)}"
+
+    def walk_frame(frame: Any) -> Any:
+        if not isinstance(frame, dict):
+            return frame
+        out = dict(frame)
+        seq["n"] += 1
+        fid = re.sub(r"[^A-Za-z0-9._-]+", "_", str(out.get("id") or f"f{seq['n']}"))[:64] or f"f{seq['n']}"
+        for key, suffix in (("image", ""), ("thumb", ".thumb")):
+            val = out.get(key)
+            if isinstance(val, str) and val.startswith("data:"):
+                url = save_blob(val, f"{fid}{suffix}")
+                if url:
+                    out[key] = url
+                else:
+                    out.pop(key, None)
+            elif isinstance(val, str) and val.startswith("/api/report/asset"):
+                pass
+            elif key in out and isinstance(val, str) and not val:
+                out.pop(key, None)
+        return out
+
+    def walk(obj: Any) -> Any:
+        if isinstance(obj, list):
+            return [walk(item) for item in obj]
+        if not isinstance(obj, dict):
+            return obj
+        out = {}
+        for key, value in obj.items():
+            if key == "frames" and isinstance(value, list):
+                out[key] = [walk_frame(item) for item in value]
+            else:
+                out[key] = walk(value)
+        return out
+
+    return walk(payload)
+
+
+def _report_asset_path(rid: str, filename: str) -> Optional[Path]:
+    """Resolve a safe path under reports/{rid}/frames/."""
+    rid = _safe_home_key(rid)
+    name = Path(str(filename or "")).name
+    if not rid or not name or not re.match(r"^[A-Za-z0-9._-]+$", name):
+        return None
+    target = (REPORTS_DIR / rid / "frames" / name).resolve()
+    root = (REPORTS_DIR / rid / "frames").resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None
+    return target if target.is_file() else None
 
 
 def _safe_home_key(home_id: str) -> str:
@@ -652,20 +774,29 @@ class AppHandler(SimpleHTTPRequestHandler):
             REPORTS_DIR.mkdir(parents=True, exist_ok=True)
             items = []
             for p in sorted(REPORTS_DIR.glob("*.json"), reverse=True):
+                if p.name.endswith(".data.json"):
+                    continue
                 try:
                     meta = json.loads(p.read_text(encoding="utf-8"))
                 except Exception:
                     continue
+                hid = _report_home_id(p.stem, meta)
                 items.append({
                     "id": p.stem,
                     "title": meta.get("title") or p.stem,
                     "createdAt": meta.get("createdAt"),
                     "summary": meta.get("summary") or "",
+                    "status": meta.get("status") or "done",
+                    "planned": meta.get("planned"),
+                    "done": meta.get("done"),
                     "total": meta.get("total"),
                     "passed": meta.get("passed"),
                     "failed": meta.get("failed"),
                     "hasMd": (REPORTS_DIR / f"{p.stem}.md").is_file(),
                     "hasCsv": (REPORTS_DIR / f"{p.stem}.csv").is_file(),
+                    "hasJson": (REPORTS_DIR / f"{p.stem}.data.json").is_file(),
+                    "homeId": hid,
+                    "homeName": meta.get("homeName") or "",
                 })
             return _json_response(self, 200, {"ok": True, "reports": items})
 
@@ -673,7 +804,40 @@ class AppHandler(SimpleHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             rid = _safe_home_key((qs.get("id") or [""])[0])
             fmt = (qs.get("fmt") or ["md"])[0]
-            ext = "csv" if fmt == "csv" else "md"
+            ext = "csv" if fmt == "csv" else "json" if fmt == "json" else "md"
+            if ext == "json":
+                data_p = REPORTS_DIR / f"{rid}.data.json"
+                meta_p = REPORTS_DIR / f"{rid}.json"
+                md_p = REPORTS_DIR / f"{rid}.md"
+                if data_p.is_file():
+                    return _json_response(self, 200, {"ok": True, "id": rid, "report": json.loads(data_p.read_text(encoding="utf-8"))})
+                if meta_p.is_file():
+                    meta = json.loads(meta_p.read_text(encoding="utf-8"))
+                    markdown = md_p.read_text(encoding="utf-8") if md_p.is_file() else ""
+                    return _json_response(self, 200, {
+                        "ok": True,
+                        "id": rid,
+                        "report": {
+                            "id": rid,
+                            "homeId": _report_home_id(rid, meta),
+                            "homeName": meta.get("homeName") or "",
+                            "title": meta.get("title") or rid,
+                            "createdAt": meta.get("createdAt"),
+                            "status": meta.get("status") or "done",
+                            "summary": {
+                                "cycles": meta.get("done") or 0,
+                                "planned": meta.get("planned"),
+                                "total": meta.get("total") or 0,
+                                "passed": meta.get("passed") or 0,
+                                "failed": meta.get("failed") or 0,
+                                "status": meta.get("status") or "done",
+                            },
+                            "cycles": [],
+                            "frames": [],
+                            "markdown": markdown,
+                        },
+                    })
+                return _json_response(self, 404, {"ok": False, "error": "report not found"})
             p = REPORTS_DIR / f"{rid}.{ext}"
             if not rid or not p.is_file():
                 return _json_response(self, 404, {"ok": False, "error": "report not found"})
@@ -687,7 +851,32 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            if ext == "json":
+                return _json_response(self, 200, {"ok": True, "id": rid, "report": json.loads(p.read_text(encoding="utf-8"))})
             return _json_response(self, 200, {"ok": True, "id": rid, "markdown": p.read_text(encoding="utf-8")})
+
+        if path == "/api/report/asset":
+            qs = parse_qs(urlparse(self.path).query)
+            rid = (qs.get("id") or [""])[0]
+            fname = (qs.get("file") or [""])[0]
+            asset = _report_asset_path(rid, fname)
+            if not asset:
+                return _json_response(self, 404, {"ok": False, "error": "asset not found"})
+            data = asset.read_bytes()
+            ctype = "image/jpeg"
+            if asset.suffix.lower() == ".png":
+                ctype = "image/png"
+            elif asset.suffix.lower() == ".webp":
+                ctype = "image/webp"
+            elif asset.suffix.lower() == ".gif":
+                ctype = "image/gif"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(data)
+            return
 
         if path == "/api/config":
             return _json_response(
@@ -809,11 +998,21 @@ class AppHandler(SimpleHTTPRequestHandler):
             REPORTS_DIR.mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
             base = _safe_home_key(str(body.get("name") or "report"))
-            rid = f"{ts}_{base}"[:80]
+            req_id = _safe_home_key(str(body.get("id") or ""))
+            if req_id and (REPORTS_DIR / f"{req_id}.json").is_file():
+                rid = req_id
+            else:
+                rid = f"{ts}_{base}"[:80]
+            status = str(body.get("status") or "done")
             meta = {
                 "title": str(body.get("title") or base),
                 "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
                 "summary": str(body.get("summary") or ""),
+                "status": status,
+                "homeId": str(body.get("homeId") or ""),
+                "homeName": str(body.get("homeName") or ""),
+                "planned": body.get("planned"),
+                "done": body.get("done"),
                 "total": body.get("total"),
                 "passed": body.get("passed"),
                 "failed": body.get("failed"),
@@ -823,6 +1022,18 @@ class AppHandler(SimpleHTTPRequestHandler):
                 (REPORTS_DIR / f"{rid}.md").write_text(str(body.get("markdown")), encoding="utf-8")
             if body.get("csv") is not None:
                 (REPORTS_DIR / f"{rid}.csv").write_text(str(body.get("csv")), encoding="utf-8")
+            if body.get("reportJson") is not None:
+                data_p = REPORTS_DIR / f"{rid}.data.json"
+                payload = body.get("reportJson")
+                try:
+                    payload = _persist_report_images(rid, payload)
+                    data_p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                except Exception as exc:
+                    print(f"[caseLib] report data.json failed: {exc}", file=sys.stderr)
+                    try:
+                        data_p.write_text(json.dumps(_strip_report_images(payload), ensure_ascii=False), encoding="utf-8")
+                    except Exception as exc2:
+                        print(f"[caseLib] report data.json slim failed: {exc2}", file=sys.stderr)
             return _json_response(self, 200, {"ok": True, "id": rid})
 
         if path == "/api/store":
