@@ -59,26 +59,17 @@ const SCENARIO_CONSTRUCT_LIB = [
     key: "disabled",
     target: "禁充禁放",
     short: "禁充禁放",
-    rule: "MCU 第一条：故障，或电池最大充=0 且最大放=0，或输出限与法规输出限均为 0",
-    also: "",
-    core: {
-      type: "limit_zero",
-      formula: "work_mode=0，AC输出限=0，法规输出限=0",
-      need: "AC输出限与法规输出限可写 0",
-      backupOf: null,
-      coverageKey: "limit_zero",
-    },
-    cores: [
-      {
-        type: "limit_zero",
-        formula: "work_mode=0，AC输出限=0，法规输出限=0",
-        coverageKey: "limit_zero",
-      },
-    ],
+    rule: "MCU：故障，或电池最大充=0 且最大放=0 → u8workModel=0x06。输入限制/输出限制=0 只截断充放功率，不改工况字",
+    also: "输入限制(DP69)=0 禁充功率，输出限制(DP53)=0 禁放功率；若 Bypass 仍过大，上报态仍可能是充电状态1，只是令功率被截成 0",
+    core: null,
     overlays: false,
     blocked: [
       { key: "fault", note: "故障码 ≠ 0 → 禁充禁放，故障码不可写" },
       { key: "bat-zero", note: "电池最大充=0 且最大放=0 依赖 BMS/温度/SoC/现场条件，页面无法直接构造" },
+      {
+        key: "limit-zero-not-state",
+        note: "输入限制=0 + 输出限制=0 只能把充放功率截成 0，MCU 仍按 PV/Bypass/SoC 走分支（常见仍报充电状态1），不会变成 0x06",
+      },
       { key: "fallback", note: "前面分支都未命中才兜底。满电不等于这一态，不靠改备用 SoC" },
     ],
   },
@@ -118,9 +109,9 @@ const SCENARIO_CONSTRUCT_LIB = [
     also: "前置分支还有 Bypass 过大、SoC≤5%；其中 Bypass 过大可在实验室通过调 PV/Bypass/负载构造",
     core: {
       type: "backup_soc",
-      formula: "work_mode=0，backup_soc = SoC + 10",
-      need: "SoC + 10 ≤ 100",
-      backupOf: (soc) => soc + 10,
+      formula: "work_mode=0，backup_soc = SoC + 11（充电1：SoC ≤ 备用−10）",
+      need: "SoC + 11 ≤ 100",
+      backupOf: (soc) => soc + 11,
     },
     cores: [
       {
@@ -130,9 +121,9 @@ const SCENARIO_CONSTRUCT_LIB = [
       },
       {
         type: "backup_soc",
-        formula: "work_mode=0，backup_soc = SoC + 10",
-        need: "SoC + 10 ≤ 100",
-        backupOf: (soc) => soc + 10,
+        formula: "work_mode=0，backup_soc = SoC + 11（充电1：SoC ≤ 备用−10）",
+        need: "SoC + 11 ≤ 100",
+        backupOf: (soc) => soc + 11,
       },
     ],
     overlays: true,
@@ -145,7 +136,7 @@ const SCENARIO_CONSTRUCT_LIB = [
     target: "充电状态2",
     short: "充电2",
     rule: "SoC ≤ 备用−5%（回差到备用 SoC 退出）",
-    also: "",
+    also: "固件 app_wifi.c：u8soc ≤ u8backupres−5 → 0x01；最小下发 backup_soc = SoC+5",
     core: {
       type: "backup_soc",
       formula: "work_mode=0，backup_soc = SoC + 5",
@@ -374,6 +365,51 @@ function _atParamExample(params) {
     .join(" ");
 }
 
+/**
+ * Integer SoC for MCU windows. Cloud SoC may be 71.4 while UI shows 72;
+ * constructing from the float then rounding backup lands on the wrong side of the edge.
+ */
+function _atSocInt(soc) {
+  if (soc == null || !Number.isFinite(Number(soc))) {
+    return null;
+  }
+  return _atClampSoc(Number(soc));
+}
+
+/**
+ * backup_soc to issue for a target. MCU uses integers:
+ *   chg1: SoC <= backup-10  → backup in [SoC+10, 100], use +11 off the edge
+ *   chg2: SoC <= backup-5  → backup = SoC+5（固件最小值；+6~+9 理论也可，但不贴边时优先 +5）
+ */
+function _atBackupForConstruct(key, soc) {
+  const s = _atSocInt(soc);
+  if (s == null) {
+    return null;
+  }
+  if (key === "chg1") {
+    if (s + 11 <= 100) {
+      return s + 11;
+    }
+    if (s + 10 <= 100) {
+      return s + 10;
+    }
+    return null;
+  }
+  if (key === "chg2") {
+    if (s + 5 <= 100) {
+      return s + 5;
+    }
+    return null;
+  }
+  if (key === "canchg") {
+    return s;
+  }
+  if (key === "cc") {
+    return s > 0 ? s - 1 : null;
+  }
+  return null;
+}
+
 function _atCoreFeasible(entry, soc, device) {
   if (!entry.core) {
     return { ok: false, reason: "当前无可写核心参数" };
@@ -396,17 +432,11 @@ function _atCoreFeasible(entry, soc, device) {
       : { ok: false, reason: `SoC=${soc}，未到 100% 兜底` };
   }
   if (entry.core.type === "backup_soc") {
-    if (soc == null) {
+    if (_atSocInt(soc) == null) {
       return { ok: false, reason: "未读到 SoC" };
     }
-    if (entry.key === "chg1" && soc + 10 > 100) {
-      return { ok: false, reason: `SoC=${soc}，backup_soc 需要 >100` };
-    }
-    if (entry.key === "chg2" && soc + 5 > 100) {
-      return { ok: false, reason: `SoC=${soc}，backup_soc 需要 >100` };
-    }
-    if (entry.key === "cc" && !(soc > 0 && soc < 100)) {
-      return { ok: false, reason: `SoC=${soc}，不满足 0<SoC<100` };
+    if (_atBackupForConstruct(entry.key, soc) == null) {
+      return { ok: false, reason: `SoC=${_atSocInt(soc)}，backup_soc 无法落在目标窗口内` };
     }
     return { ok: true, reason: "" };
   }
@@ -425,16 +455,18 @@ function _atBuildCoreParams(entry, device, soc) {
   }
   if (entry.core?.type === "limit_zero") {
     return {
-      work_mode: "0",
+      inverter_input_power_limit: "0",
       output_power_limit: "0",
-      regulation_grid_export_p_limit: "0",
     };
   }
   if (entry.core?.type === "soc_100") {
     return {};
   }
   if (entry.core?.type === "backup_soc") {
-    const backup = _atClampSoc(entry.core.backupOf(soc));
+    const backup = _atBackupForConstruct(entry.key, soc);
+    if (backup == null) {
+      return {};
+    }
     return { work_mode: "0", backup_soc: String(backup) };
   }
   return {};
@@ -457,7 +489,7 @@ function _atRecipeNote(entry, overlay, coreOk) {
     return coreOk.plan?.note || entry.core.formula;
   }
   if (entry.core?.type === "limit_zero") {
-    return "AC 输出限 / 法规输出限同时置 0 → 禁充禁放；其余路径需故障或现场条件";
+    return "输入限制=0（禁充）且输出限制=0（禁放）→ 禁充禁放；其余路径需故障或现场条件";
   }
   if (entry.core?.type === "soc_100") {
     return "当前 SoC=100%，无需下发。";
@@ -595,7 +627,9 @@ function buildConstructLibrary(home, selectedUids) {
       if (strategy.coverageKey === "natural" || strategy.coverageKey === "read_required") {
         continue;
       }
-      const id = strategy.coverageKey + ":" + Object.keys(strategy.params || {}).sort().join(",");
+      const id = strategy.coverageKey === "readonly_gap"
+        ? `readonly_gap:${strategy.key}`
+        : (strategy.coverageKey + ":" + Object.keys(strategy.params || {}).sort().join(","));
       if (seen.has(id)) {
         continue;
       }

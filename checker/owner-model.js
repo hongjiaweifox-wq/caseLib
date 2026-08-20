@@ -162,8 +162,11 @@ function classifyOwnerWorkModel(device) {
     batChg = Math.min(batChg, Math.max(0, dpChg));
   }
   const batDchg = _ownerPickLim(v, ["bat_max_dchg_w", "battery_max_discharge_power"], modelBatDchgCap);
-  const outLim = _ownerPickLim(v, ["output_power_limit", "regulation_grid_export_p_limit"], invCap);
+  const outLim = _ownerPickLim(v, ["output_power_limit"], invCap);
   const gridLim = _ownerPickLim(v, ["inverter_input_power_limit"], invCap);
+  const exportLim = _ownerPickLim(v, ["regulation_grid_export_p_limit"], null);
+  // 放电并网口上限：输出限制与法规输出限取更严者（法规限只影响可放功率，不单独构成禁充禁放）
+  const dchgOutLim = exportLim == null ? outLim : Math.min(outLim, exportLim);
   const invLim = invCap;
   const pvVolt = _ownerNum(v.pv_volt_max ?? v.pv1_voltage, 0);
   const invFault = _ownerFault(v.fault) || _ownerFault(v.error_code);
@@ -192,6 +195,8 @@ function classifyOwnerWorkModel(device) {
     batDchg,
     outLim,
     gridLim,
+    exportLim,
+    dchgOutLim,
     invLim,
     bypassCap,
     pvVolt,
@@ -207,7 +212,7 @@ function classifyOwnerWorkModel(device) {
     let c = Math.max(0, Math.round(chg));
     let d = Math.max(0, Math.round(dchg));
     if (c > gridLim) c = invLim < gridLim ? invLim : gridLim;
-    if (d > outLim) d = invLim < outLim ? invLim : outLim;
+    if (d > dchgOutLim) d = invLim < dchgOutLim ? invLim : dchgOutLim;
     return [c, d];
   };
   const ret = (model, chg, dchg, reason, formula) => {
@@ -225,14 +230,16 @@ function classifyOwnerWorkModel(device) {
 
   if (Number.isNaN(soc)) return null;
 
-  if (invFault || (batChg === 0 && batDchg === 0) || (gridLim === 0 && outLim === 0)) {
+  if (invFault || (batChg === 0 && batDchg === 0)) {
     return ret(
       OWNER_WORK_MODEL.DISABLED,
       0,
       0,
-      "故障或充放限均为 0",
-      `条件：故障码 ≠ 0  或  (电池最大充=${batChg} 且 最大放=${batDchg})  或  (并网充限=${gridLim} 且 并网放限=${outLim})\n` +
-        `故障判定=${invFault}\n→ 禁充禁放，上报可充=0 / 可放=0`
+      "故障或电池充放能力均为 0",
+      `条件：故障码 ≠ 0  或  (电池最大充=${batChg} 且 最大放=${batDchg})\n` +
+        `故障判定=${invFault}\n` +
+        `说明：输入限制/输出限制=0 只会把上报充放功率截到 0，不会把工况改成 0x06\n` +
+        `→ 禁充禁放，上报可充=0 / 可放=0`
     );
   }
 

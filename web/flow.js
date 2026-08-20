@@ -741,7 +741,29 @@ function unitCardHtml(g) {
        <span class="owner-caps" title="${flowEsc(decideTip)}">${flowEsc(decideTxt)}</span>`
     : `<span class="hint">—</span>`;
 
-  return `<div xmlns="http://www.w3.org/1999/xhtml" class="u3 u3-fit ${loading}" data-uid="${flowEsc(d.uid)}" data-device-uid="${flowEsc(d.uid)}">
+  const online =
+    typeof deviceIsOnline === "function" ? deviceIsOnline(d) : d.isOnline !== false;
+  const offlineMark = online
+    ? ""
+    : `<span class="u3-offline-mark" title="设备离线，无法下发">离线</span>`;
+  const reportAt = d.reportTime ? Number(d.reportTime) : 0;
+  const reportAbs =
+    reportAt > 0 && typeof fmtTime === "function" ? fmtTime(reportAt) : "";
+  const reportRel =
+    reportAt > 0 && typeof relativeTime === "function" ? relativeTime(reportAt) : "";
+  const reportTimeTxt = reportAt > 0
+    ? `${reportAbs}${reportRel ? ` · ${reportRel}` : ""}`
+    : "尚未上报";
+  const reportTimeTitle = reportAt > 0
+    ? `最新上报时间 ${reportAbs}${reportRel ? `（${reportRel}）` : ""}`
+    : "尚未读到设备上报时间";
+  const canIssue = online && draftsN > 0;
+  const issueTitle = online
+    ? (draftsN ? `下发 ${draftsN} 个草稿点` : "暂无待下发草稿")
+    : "设备离线，无法下发";
+
+  return `<div xmlns="http://www.w3.org/1999/xhtml" class="u3 u3-fit ${loading}${online ? "" : " is-offline"}" data-uid="${flowEsc(d.uid)}" data-device-uid="${flowEsc(d.uid)}">
+    ${offlineMark}
     <div class="u3-name">
       <div class="u3-title">
         <span class="u3-devname" title="${flowEsc(g.name)}">${flowEsc(g.name)}</span>
@@ -754,7 +776,7 @@ function unitCardHtml(g) {
       </span>
     </div>
     <div class="layer l1">
-      <div class="lh"><span>① 实时上报</span><span>影子</span></div>
+      <div class="lh"><span>① 实时上报</span><span class="u3-report-time" title="${flowEsc(reportTimeTitle)}">${flowEsc(reportTimeTxt)}</span></div>
       <div class="grid2">
         ${liveHtml}
         ${famLiveHtml}
@@ -788,7 +810,7 @@ function unitCardHtml(g) {
         <button type="button" class="u3-link" data-act="reg-query" title="物模型明文值，或查 DP 原始报文中的寄存器">寄存器查询</button>
         <button type="button" class="u3-link" data-act="edit">编辑</button>
         <button type="button" class="u3-link danger" data-act="remove">移除</button>
-        <button type="button" class="u3-issue ${draftsN ? "on" : ""}" data-act="issue" ${draftsN ? "" : "disabled"}>
+        <button type="button" class="u3-issue ${canIssue ? "on" : ""}${online ? "" : " is-offline"}" data-act="issue" ${canIssue ? "" : "disabled"} title="${flowEsc(issueTitle)}">
           ${draftsN ? `下发 (${draftsN})` : "下发"}
         </button>
       </div>

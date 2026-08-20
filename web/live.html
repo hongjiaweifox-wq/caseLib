@@ -8,7 +8,7 @@
   <link rel="shortcut icon" href="/app-icon-20260806.png" />
   <link rel="apple-touch-icon" href="/app-icon-20260806.png" />
   <link rel="icon" href="/favicon.svg?v=20260806-57" type="image/svg+xml" />
-  <link rel="stylesheet" href="/style.css?v=20260819-caselib96" />
+  <link rel="stylesheet" href="/style.css?v=20260820-caselib121" />
 </head>
 <body>
   <div id="app" class="layout">
@@ -135,7 +135,7 @@
           <div id="atPanelRun" class="at-sub-panel hidden">
             <div class="at-run-toolbar">
               <label class="at-opt at-home-pick">家庭<select id="atHomeSelectRun"></select></label>
-              <label class="at-opt">周期(秒)<input type="number" id="atSettle" min="3" max="120" step="1" value="15" /></label>
+              <label class="at-opt" title="下发后等待设备上报再检查的总时长：一半拍「运行中」，到点后读回并检查">下发→检查(秒)<input type="number" id="atSettle" min="10" max="180" step="1" value="30" /></label>
               <label class="at-opt" title="家庭电网购电限值(规划中·非可读点位)。填了才启用充2抑制条件一：充1需求>电网限+三方光伏。留空则仅用条件二(可放总+三方)。">电网购电限(W)<input type="number" id="atGridBuyLimit" min="0" step="100" placeholder="留空=不用" style="width:96px" /></label>
               <label class="at-opt" title="三方光伏(W)。默认取各机 bypass 口三方光伏倒灌之和；可手动覆盖。">三方光伏(W)<input type="number" id="atThirdPv" min="0" step="100" placeholder="默认实测" style="width:88px" /></label>
               <label class="at-opt"><input type="checkbox" id="atRestore" checked /> 结束后恢复原参数</label>
@@ -410,6 +410,16 @@
     </div>
   </dialog>
 
+  <dialog id="dlgChkExplain" class="modal modal-wide">
+    <div class="modal-card">
+      <h3 id="chkExplainTitle">公式说明</h3>
+      <div id="chkExplainBody" class="at-chk-explain-body at-chk-explain-dlg"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-primary" id="btnChkExplainClose">关闭</button>
+      </div>
+    </div>
+  </dialog>
+
   <dialog id="dlgAppConfirm" class="modal">
     <div class="modal-card">
       <h3 id="appConfirmTitle">确认</h3>
@@ -432,7 +442,9 @@
       <button type="button" class="at-frame-peek-close" id="atFramePeekClose" title="关闭预览">×</button>
     </div>
     <div class="at-frame-peek-view" id="atFramePeekView">
+      <button type="button" class="at-frame-peek-nav at-frame-peek-prev" id="atFramePeekPrev" title="上一帧 (←)" aria-label="上一帧">‹</button>
       <img id="atFramePeekImg" alt="frame preview" draggable="false" />
+      <button type="button" class="at-frame-peek-nav at-frame-peek-next" id="atFramePeekNext" title="下一帧 (→)" aria-label="下一帧">›</button>
     </div>
     <span class="at-frame-peek-resize" id="atFramePeekResize" title="拖拽左下角缩放窗口"></span>
   </div>
@@ -440,12 +452,12 @@
   <div id="toast" class="toast hidden"></div>
   <script src="/html2canvas.min.js"></script>
   <!-- 层3 checker 固件运行逻辑（对齐 CBE_RESONATE_MASTER）：先于 flow.js/app.js 加载 -->
-  <script src="/checker/device-model.js?v=20260819-caselib96"></script>
-  <script src="/checker/owner-model.js?v=20260819-caselib96"></script>
+  <script src="/checker/device-model.js?v=20260820-caselib121"></script>
+  <script src="/checker/owner-model.js?v=20260820-caselib121"></script>
   <script src="/checker/dp98.js?v=20260818-caselib42"></script>
-  <script src="/checker/cluster.js?v=20260819-caselib96"></script>
-  <script src="/checker/construct-lib.js?v=20260819-caselib96"></script>
-  <script src="/flow.js?v=20260819-caselib96"></script>
-  <script src="/app.js?v=20260819-caselib96"></script>
+  <script src="/checker/cluster.js?v=20260820-caselib121"></script>
+  <script src="/checker/construct-lib.js?v=20260820-caselib121"></script>
+  <script src="/flow.js?v=20260820-caselib121"></script>
+  <script src="/app.js?v=20260820-caselib121"></script>
 </body>
 </html>

@@ -202,7 +202,7 @@ test("telemetry bat max charge and discharge both 0 is 禁充禁放", () => {
   assert.equal(owner.label, "禁充禁放");
 });
 
-test("AC input and output limits both 0 is 禁充禁放", () => {
+test("AC input and output limits both 0 do not force 禁充禁放 workModel", () => {
   const ctx = loadCheckerRuntime();
   const device = cbe2000({
     current_soc: 70,
@@ -210,9 +210,29 @@ test("AC input and output limits both 0 is 禁充禁放", () => {
     inverter_input_power_limit: 0,
     output_power_limit: 0,
     regulation_grid_export_p_limit: 0,
+    pv_power_total: 0,
+    offgrid1_export_power: 0,
   });
   const owner = ctx.classifyOwnerWorkModel(device);
   assert.equal(owner.inputs.gridLim, 0);
   assert.equal(owner.inputs.outLim, 0);
-  assert.equal(owner.label, "禁充禁放");
+  assert.notEqual(owner.label, "禁充禁放");
+  assert.equal(owner.chgCapW, 0);
+  assert.equal(owner.dchgCapW, 0);
+});
+
+test("AC limits 0 with large Bypass still reports 充电状态1 with zero power", () => {
+  const ctx = loadCheckerRuntime();
+  const device = cbe2000({
+    current_soc: 70,
+    backup_soc: 20,
+    inverter_input_power_limit: 0,
+    output_power_limit: 0,
+    pv_power_total: 0,
+    offgrid1_export_power: 2000,
+  });
+  const owner = ctx.classifyOwnerWorkModel(device);
+  assert.equal(owner.label, "充电状态1");
+  assert.equal(owner.chgCapW, 0);
+  assert.equal(owner.dchgCapW, 0);
 });

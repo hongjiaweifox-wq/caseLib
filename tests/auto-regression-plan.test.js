@@ -72,7 +72,7 @@ test("device scenario plan expands every target with strategy variants", () => {
   assert.ok(byTarget["充电状态2"].strategies.some((s) => s.coverageKey === "input_limit"));
   assert.ok(byTarget["可充可放"].strategies.some((s) => s.coverageKey === "output_limit"));
   assert.ok(byTarget["放电"].strategies.some((s) => s.coverageKey === "hal_discharge"));
-  assert.ok(byTarget["禁充禁放"].strategies.some((s) => s.coverageKey === "limit_zero"));
+  assert.ok(byTarget["禁充禁放"].strategies.every((s) => s.coverageKey !== "limit_zero"));
   assert.ok(byTarget["禁充禁放"].strategies.some((s) => s.coverageKey === "readonly_gap"));
   assert.ok(byTarget["禁充禁放"].strategies.every((s) => s.coverageKey !== "soc_100_fallback"));
 });
@@ -84,7 +84,7 @@ test("construct library lists every writable overlay combo per scenario", () => 
   const lib = ctx.getScenarioConstructLibrary();
   assert.equal(lib.length, 7);
   const chg1 = lib.find((item) => item.key === "chg1");
-  assert.equal(chg1.core.formula.includes("SoC + 10"), true);
+  assert.equal(chg1.core.formula.includes("SoC + 11"), true);
   const view = ctx.buildConstructLibrary({ devices: [sampleDevice()] }, ["dev-1"]);
   const chg1View = view.items.find((item) => item.key === "chg1");
   const writable = chg1View.recipes.filter((r) => r.coverageKey !== "readonly_gap");
@@ -96,7 +96,15 @@ test("construct library lists every writable overlay combo per scenario", () => 
   assert.ok(writable.some((r) => r.coverageKey === "output_limit"));
   assert.ok(writable.some((r) => r.coverageKey === "regulation_limit"));
   const chg1Backup = writable.find((r) => r.coverageKey === "backup_soc");
-  assert.match(chg1Backup.example, /backup_soc=70/);
+  assert.match(chg1Backup.example, /backup_soc=71/);
+  const chg2View = view.items.find((item) => item.key === "chg2");
+  const chg2Backup = chg2View.recipes.find((r) => r.coverageKey === "backup_soc");
+  assert.match(chg2Backup.example, /backup_soc=65/);
+  const edge = ctx.buildConstructLibrary({
+    devices: [sampleDevice({ values: { ...sampleDevice().values, current_soc: 72 } })],
+  }, ["dev-1"]);
+  const chg2Edge = edge.items.find((item) => item.key === "chg2").recipes.find((r) => r.coverageKey === "backup_soc");
+  assert.match(chg2Edge.example, /backup_soc=77/);
   const discharge = view.items.find((item) => item.key === "discharge");
   const dischargeWritable = discharge.recipes.filter((r) => r.coverageKey !== "readonly_gap");
   assert.ok(dischargeWritable.some((r) => r.coverageKey === "hal_discharge"));
@@ -108,13 +116,11 @@ test("construct library lists every writable overlay combo per scenario", () => 
   assert.ok(candis.recipes.every((r) => r.coverageKey === "readonly_gap"));
   const disabled = view.items.find((item) => item.key === "disabled");
   const disabledWritable = disabled.recipes.filter((r) => r.coverageKey !== "readonly_gap");
-  assert.ok(disabledWritable.some((r) => r.coverageKey === "limit_zero"));
-  const gridZero = disabledWritable.find((r) => r.coverageKey === "limit_zero");
-  assert.equal(gridZero.params.output_power_limit, "0");
-  assert.equal(gridZero.params.regulation_grid_export_p_limit, "0");
-  assert.ok(disabled.writableN > 0);
-  assert.match(disabled.formula, /输出限=0/);
-  assert.match(disabled.formula, /法规输出限=0/);
+  assert.equal(disabledWritable.length, 0);
+  assert.ok(disabled.recipes.some((r) => /输入限制=0/.test(r.note || "")));
+  assert.ok(disabled.recipes.some((r) => /故障码/.test(r.note || "")));
+  assert.equal(disabled.writableN, 0);
+  assert.match(disabled.rule, /0x06|电池最大充/);
 });
 
 test("combo execution plan builds dev[target] / dev[target] labels", () => {

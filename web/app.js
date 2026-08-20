@@ -2051,12 +2051,20 @@ function stopAutoRefreshTimer() {
 
 async function tickAutoRefresh() {
   if (!autoRefreshEnabled || autoRefreshBusy) return;
+  if (typeof atUiFrozen !== "undefined" && atUiFrozen) return;
+  if (typeof atRunning !== "undefined" && atRunning) return;
   if (document.hidden) return;
   if (liveCanvasDragging) return;
   if (typeof homeTab !== "undefined" && homeTab !== "live") return;
   if (!activeHome()) return;
   autoRefreshBusy = true;
   try {
+    const home = activeHome();
+    if (home?.homeId) {
+      try {
+        await refreshDeviceOnlineFlags(home);
+      } catch (_) {}
+    }
     await readAllActiveHome({ quiet: true });
   } catch (err) {
     console.warn("auto refresh failed", err);
@@ -2365,6 +2373,7 @@ function normalizeDevice(d) {
     values: {},
     reportTime: null,
     lastReadAt: null, // 仅会话内：本机最近一次成功读取
+    isOnline: d.isOnline == null ? null : !!d.isOnline, // 会话内：家庭设备列表在线态
     schema: d.schema || {},
     protocol: d.protocol || null,
     socSeries: [],
@@ -2852,6 +2861,84 @@ async function fetchHomeDevices(home) {
   return out;
 }
 
+/**
+ * @brief Parse online flag from backendng homeDevice row
+ * @param[in] row homeDevice item
+ * @return true/false when known, null when unknown
+ */
+function parseDeviceOnline(row) {
+  if (!row || typeof row !== "object") {
+    return null;
+  }
+  if (typeof row.isOnline === "boolean") {
+    return row.isOnline;
+  }
+  if (typeof row.online === "boolean") {
+    return row.online;
+  }
+  const flag = row.isOnline ?? row.online;
+  if (flag === 1 || flag === "1" || flag === "true" || flag === "TRUE") {
+    return true;
+  }
+  if (flag === 0 || flag === "0" || flag === "false" || flag === "FALSE") {
+    return false;
+  }
+  const status = row.status ?? row.deviceStatus ?? row.onlineStatus;
+  if (status === 1 || status === "1" || status === "online" || status === "ONLINE") {
+    return true;
+  }
+  if (status === 2 || status === "2" || status === "offline" || status === "OFFLINE") {
+    return false;
+  }
+  return null;
+}
+
+/**
+ * @brief Whether device can be selected for automation
+ * @param[in] device device object
+ * @return true when online or unknown; false when known offline
+ */
+function deviceIsOnline(device) {
+  if (!device) {
+    return false;
+  }
+  if (device.isOnline === false) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Refresh isOnline flags from homeDevice without rebuilding device list
+ * @param[in] home home object
+ * @return none
+ */
+async function refreshDeviceOnlineFlags(home) {
+  if (!home?.homeId || !(home.devices || []).length) {
+    return;
+  }
+  const raw = await fetchHomeDevices(home);
+  const byId = new Map();
+  for (const row of raw) {
+    const id = String(row.devId || row.deviceId || "").trim();
+    if (id) {
+      byId.set(id, row);
+    }
+  }
+  for (const dev of home.devices || []) {
+    const row = byId.get(String(dev.deviceId || ""));
+    if (!row) {
+      // 家庭列表已无此设备，按离线处理，避免自动化误选
+      dev.isOnline = false;
+      continue;
+    }
+    const online = parseDeviceOnline(row);
+    if (online != null) {
+      dev.isOnline = online;
+    }
+  }
+}
+
 /** 按家庭 ID 重新拉取设备，只保留型号分配里关联过的 PID。 */
 async function refreshHomeDevices(home, opts = {}) {
   if (!home || !home.homeId) {
@@ -2880,6 +2967,10 @@ async function refreshHomeDevices(home, opts = {}) {
         prev.deviceId = devId;
         prev.name = (x.customName || x.name || prev.name || "").trim();
         prev.pid = pid;
+        const online = parseDeviceOnline(x);
+        if (online != null) {
+          prev.isOnline = online;
+        }
         merged = prev;
       } else {
         merged = normalizeDevice({
@@ -2887,6 +2978,7 @@ async function refreshHomeDevices(home, opts = {}) {
           name: (x.customName || x.name || "").trim(),
           pid,
           model: (x.name || "").trim(),
+          isOnline: parseDeviceOnline(x),
         });
       }
       applyPidModel(merged, pid);
@@ -3845,6 +3937,10 @@ async function readMeter(home, meter, opts = {}) {
 
 async function issueDevice(home, device, opts = {}) {
   const batch = !!opts.batch;
+  if (typeof deviceIsOnline === "function" && !deviceIsOnline(device)) {
+    if (!batch) toast("设备离线，无法下发", "error");
+    return false;
+  }
   const propertyList = [];
   const wmDraft = (device.drafts?.work_mode || "").trim();
   if (wmDraft !== "" && String(device.values?.work_mode ?? "") !== wmDraft) {
@@ -4768,6 +4864,18 @@ function setHomeTab(tab) {
   const allowed = ["live", "charts", "snapshots", "election"];
   homeTab = allowed.includes(tab) ? tab : "live";
   _syncHomeTabPanels();
+  if (homeTab === "live") {
+    const home = activeHome();
+    if (home?.homeId && (home.devices || []).length) {
+      refreshDeviceOnlineFlags(home)
+        .then(() => {
+          if (homeTab === "live" && activeHome()?.uid === home.uid) {
+            render();
+          }
+        })
+        .catch(() => {});
+    }
+  }
   if (homeTab === "charts") {
     const home = activeHome();
     if (home) {
@@ -5219,7 +5327,13 @@ function renderDeviceCard(home, device) {
     persist();
     render();
   });
-  card.querySelector('[data-act="issue"]').addEventListener("click", () => issueDevice(home, device));
+  card.querySelector('[data-act="issue"]').addEventListener("click", () => {
+    if (!deviceIsOnline(device)) {
+      toast("设备离线，无法下发", "error");
+      return;
+    }
+    issueDevice(home, device);
+  });
 
   mountInteractiveChart(card.querySelector("[data-soc-chart]"), device.socSeries || [], {
     unit: "%",
@@ -5255,12 +5369,43 @@ function updateIssueButtons() {
     const uid = card.getAttribute("data-device-uid");
     const device = home.devices.find((d) => d.uid === uid);
     if (!device) return;
+    const online = deviceIsOnline(device);
     const n = countDrafts(device);
+    const canIssue = online && n > 0;
     const btn = card.querySelector('[data-act="issue"]');
     if (!btn) return;
-    btn.disabled = n === 0;
+    btn.disabled = !canIssue;
     btn.textContent = n ? `下发 (${n})` : "下发";
-    btn.classList.toggle("on", n > 0);
+    btn.classList.toggle("on", canIssue);
+    btn.classList.toggle("is-offline", !online);
+    btn.title = online
+      ? (n ? `下发 ${n} 个草稿点` : "暂无待下发草稿")
+      : "设备离线，无法下发";
+    card.classList.toggle("is-offline", !online);
+    let mark = card.querySelector(".u3-offline-mark");
+    if (!online) {
+      if (!mark) {
+        mark = document.createElement("span");
+        mark.className = "u3-offline-mark";
+        mark.title = "设备离线，无法下发";
+        mark.textContent = "离线";
+        card.prepend(mark);
+      }
+    } else if (mark) {
+      mark.remove();
+    }
+    const reportEl = card.querySelector(".u3-report-time");
+    if (reportEl) {
+      const reportAt = device.reportTime ? Number(device.reportTime) : 0;
+      const reportAbs = reportAt > 0 ? fmtTime(reportAt) : "";
+      const reportRel = reportAt > 0 ? relativeTime(reportAt) : "";
+      reportEl.textContent = reportAt > 0
+        ? `${reportAbs}${reportRel ? ` · ${reportRel}` : ""}`
+        : "尚未上报";
+      reportEl.title = reportAt > 0
+        ? `最新上报时间 ${reportAbs}${reportRel ? `（${reportRel}）` : ""}`
+        : "尚未读到设备上报时间";
+    }
   });
 }
 
@@ -6073,7 +6218,13 @@ function bindFlowHost(home) {
       persist();
       render();
     });
-    card.querySelector('[data-act="issue"]')?.addEventListener("click", () => issueDevice(home, device));
+    card.querySelector('[data-act="issue"]')?.addEventListener("click", () => {
+      if (!deviceIsOnline(device)) {
+        toast("设备离线，无法下发", "error");
+        return;
+      }
+      issueDevice(home, device);
+    });
   });
 
   host.querySelectorAll(".rail-meter[data-meter-uid]").forEach((el) => {
@@ -7186,6 +7337,9 @@ function restoreLiveCanvasView(view) {
 }
 
 function render() {
+  if (typeof atUiFrozen !== "undefined" && atUiFrozen) {
+    return;
+  }
   renderSidebar();
   renderMain();
 }
@@ -7315,6 +7469,7 @@ function _atMasterOpts() {
 // [moved → checker/cluster.js] AUTO_TARGETS / buildAutoMatrix
 
 let atRunning = false;
+let atUiFrozen = false;
 let atPauseRequested = false;
 let atActiveReportId = null;
 let atShowResults = false; // true 时保留时间轴/报告，不重建矩阵预览
@@ -7369,6 +7524,16 @@ function setAtInnerTab(tab) {
     renderAutoLib();
   } else if (atInnerTab === "run") {
     renderAutoRun();
+    const home = activeHome();
+    if (home?.homeId && (home.devices || []).length) {
+      refreshDeviceOnlineFlags(home)
+        .then(() => {
+          if (atInnerTab === "run") {
+            renderAutoRun();
+          }
+        })
+        .catch(() => {});
+    }
   } else {
     renderAutoReport();
   }
@@ -7439,7 +7604,7 @@ function pauseAutoTest() {
 }
 
 function _atEnsureSelected(home) {
-  const all = (home?.devices || []).map((dev) => dev.uid);
+  const all = (home?.devices || []).filter((dev) => deviceIsOnline(dev)).map((dev) => dev.uid);
   if (atSelectedUids == null) {
     atSelectedUids = [...all];
     return atSelectedUids;
@@ -7673,25 +7838,32 @@ function _atDeviceScopeHtml(home, selectedUids, devicePlans) {
     if (!plan) {
       return "";
     }
-    const checked = selectedUids.includes(dev.uid);
+    const online = deviceIsOnline(dev);
+    const checked = online && selectedUids.includes(dev.uid);
     const map = _atEnsureTargetMap(plan);
     const chips = (plan.scenarios || []).map((scenario) => {
       const short = typeof _atShortTarget === "function" ? _atShortTarget(scenario.target) : scenario.target;
       const tone = _atModelClass(scenario.target);
+      if (!online) {
+        return `<button type="button" class="at-tchip ${tone} skip" disabled title="设备离线，不可参与自动化">${escapeHtml(short)}</button>`;
+      }
       if (!scenario.feasible) {
         return `<button type="button" class="at-tchip ${tone} skip" disabled title="${escapeAttr(scenario.note || "当前无法构造")}">${escapeHtml(short)}</button>`;
       }
       const on = map[scenario.key] !== false;
       return `<button type="button" class="at-tchip ${tone} ${on ? "ok" : "off"}" data-at-target-uid="${escapeAttr(dev.uid)}" data-at-target-key="${escapeAttr(scenario.key)}" aria-pressed="${on ? "true" : "false"}" title="${escapeAttr(scenario.target + (on ? "（已选入笛卡尔积）" : "（不参与组合）"))}">${escapeHtml(short)}</button>`;
     }).join("");
-    const onN = _atTargetOnCount(plan);
+    const onN = online ? _atTargetOnCount(plan) : 0;
     const feasN = (plan.scenarios || []).filter((scenario) => scenario.feasible).length;
-    return `<div class="at-dev-card ${checked ? "" : "is-off"}">` +
+    const onlineBadge = online
+      ? `<span class="at-dev-online is-on" title="在线">在线</span>`
+      : `<span class="at-dev-online is-off" title="离线设备不可参与自动化">离线</span>`;
+    return `<div class="at-dev-card ${checked ? "" : "is-off"} ${online ? "" : "is-offline"}">` +
       `<div class="at-dev-head">` +
-        `<label class="at-dev-name"><input type="checkbox" data-at-uid="${escapeAttr(dev.uid)}" ${checked ? "checked" : ""} /> ${escapeHtml(dev.name || dev.deviceId)}</label>` +
-        `<span class="at-dev-soc">SoC ${plan.soc == null ? "—" : plan.soc + "%"} · ${_atModelChipHtml(plan.currentLabel)}</span>` +
+        `<label class="at-dev-name"><input type="checkbox" data-at-uid="${escapeAttr(dev.uid)}" ${checked ? "checked" : ""} ${online ? "" : "disabled"} /> ${escapeHtml(dev.name || dev.deviceId)}</label>` +
+        `<span class="at-dev-soc">${onlineBadge} · SoC ${plan.soc == null ? "—" : plan.soc + "%"} · ${_atModelChipHtml(plan.currentLabel)}</span>` +
       `</div>` +
-      `<div class="at-dev-targets"><span class="k">工况</span>${chips}<span class="at-dev-feas">${onN}/${feasN} 已选</span></div>` +
+      `<div class="at-dev-targets"><span class="k">工况</span>${chips}<span class="at-dev-feas">${online ? `${onN}/${feasN} 已选` : "离线不可选"}</span></div>` +
     `</div>`;
   }).join("");
 }
@@ -7782,13 +7954,13 @@ function _atHomeSummaryHtml(home, expect) {
 }
 
 const AT_LIB_META = {
-  chg1: { tone: "chg1", how: "把备用电量抬到当前之上 10%，机器会当成亏电，进入强充。", delta: 10, mark: "above" },
-  chg2: { tone: "chg2", how: "备用只比当前高 5%，是较弱的强制充电。", delta: 5, mark: "above" },
+  chg1: { tone: "chg1", how: "把备用电量抬到当前之上 11%，卡进充电1（SoC ≤ 备用−10），避免贴边落到充电2。", delta: 11, mark: "above" },
+  chg2: { tone: "chg2", how: "备用比当前高 5%，对齐固件 SoC ≤ 备用−5% 进入充电2。", delta: 5, mark: "above" },
   cc: { tone: "cc", how: "备用略低于当前，电量夹在中间，可充也可放。", delta: -1, mark: "below" },
   canchg: { tone: "canchg", how: "纯 DP 路是备用对齐当前电量；实验室里也能靠调 PV / Bypass / 家庭负载，把放余量压到 ≤0。", delta: 0, mark: "same" },
   candis: { tone: "candis", how: "要现场把电池最大充拉到 0，页面本身写不出来。", delta: null, mark: "none" },
   discharge: { tone: "dchg", how: "实验室可调 PV / Bypass / 家庭负载时，可以构造；核心是让 PV−Bypass ≥ 电池最大充，且 batChg>0。", delta: null, mark: "none" },
-  disabled: { tone: "off", how: "核心下发是 AC 输出限=0 + 法规输出限=0；其余像故障、bat 充放都为 0 属于不可直接下发的现场条件。", delta: null, mark: "none" },
+  disabled: { tone: "off", how: "MCU 只有故障或电池充放都为 0 才报 0x06。输入/输出限制=0 只能截断功率，状态字仍可能停在充电1 等分支。", delta: null, mark: "none" },
 };
 const AT_LIB_DP = {
   work_mode: {
@@ -7801,8 +7973,8 @@ const AT_LIB_DP = {
     },
   },
   backup_soc: { label: "备用电量", fmt: (v) => `${v}%` },
-  inverter_input_power_limit: { label: "AC 输入限", fmt: (v) => `${v}W` },
-  output_power_limit: { label: "AC 输出限", fmt: (v) => `${v}W` },
+  inverter_input_power_limit: { label: "输入限制", fmt: (v) => `${v}W` },
+  output_power_limit: { label: "输出限制", fmt: (v) => `${v}W` },
   regulation_grid_export_p_limit: { label: "法规输出限", fmt: (v) => `${v}W` },
 };
 const AT_LIB_HAL = [
@@ -7840,7 +8012,7 @@ function _atLibParseSoc(recipe, meta) {
 
 function _atLibCoreTitle(recipe) {
   if (recipe?.coverageKey === "limit_zero") {
-    return "核心下发 · 输出限=0 + 法规输出限=0";
+    return "仅截断功率 · 输入=0 + 输出=0（不改 MCU 工况字）";
   }
   if (recipe?.coverageKey === "hal_discharge") {
     return "实验室构造 · 放电";
@@ -8207,7 +8379,7 @@ function renderAutoLib() {
           : `<span class="at-lib-reach">无可写下发</span>`)
       : (core
           ? (item.key === "disabled"
-              ? `<span class="at-lib-reach">输出限=0 + 法规输出限=0</span>`
+              ? `<span class="at-lib-reach">页面构造不了 0x06</span>`
               : `<span class="at-lib-reach">SoC=65% 示意</span>`)
           : `<span class="at-lib-reach">无可写下发</span>`);
     const blockedLine = blocked.length
@@ -8282,7 +8454,7 @@ function renderAutoRun() {
         `<button type="button" class="btn btn-ghost btn-xs" id="atSelectNone">设备清空</button>` +
         `<button type="button" class="btn btn-ghost btn-xs" id="atTargetAll">工况全选</button>` +
         `<button type="button" class="btn btn-ghost btn-xs" id="atTargetNone">工况清空</button></span></div>` +
-      `<p class="hint">勾选设备后，再点工况徽章决定这台机参与哪些态。划掉的是当前构造不了的工况。</p>` +
+      `<p class="hint">勾选设备后，再点工况徽章决定这台机参与哪些态。划掉的是当前构造不了的工况；离线设备不可勾选。</p>` +
       `<div class="at-dev-cards">${_atDeviceScopeHtml(home, selectedUids, allPlans) || `<span class="hint">当前家庭暂无设备</span>`}</div>` +
     `</div>`;
   const caseRows = (execPlan.cycles || []).map((cycle) => _atCaseRowHtml(cycle)).join("");
@@ -8305,6 +8477,13 @@ function renderAutoRun() {
     cb.addEventListener("change", () => {
       const uid = cb.getAttribute("data-at-uid");
       if (!uid) return;
+      const dev = (home.devices || []).find((item) => item.uid === uid);
+      if (!deviceIsOnline(dev)) {
+        cb.checked = false;
+        toast("离线设备不可参与自动化", "error");
+        renderAutoRun();
+        return;
+      }
       if (cb.checked) {
         if (!atSelectedUids.includes(uid)) atSelectedUids.push(uid);
       } else {
@@ -8318,6 +8497,11 @@ function renderAutoRun() {
       const uid = btn.getAttribute("data-at-target-uid");
       const key = btn.getAttribute("data-at-target-key");
       if (!uid || !key) return;
+      const dev = (home.devices || []).find((item) => item.uid === uid);
+      if (!deviceIsOnline(dev)) {
+        toast("离线设备不可参与自动化", "error");
+        return;
+      }
       if (!atSelectedUids.includes(uid)) {
         atSelectedUids.push(uid);
       }
@@ -8328,7 +8512,7 @@ function renderAutoRun() {
     });
   });
   body.querySelector("#atSelectAll")?.addEventListener("click", () => {
-    atSelectedUids = (home.devices || []).map((dev) => dev.uid);
+    atSelectedUids = (home.devices || []).filter((dev) => deviceIsOnline(dev)).map((dev) => dev.uid);
     renderAutoRun();
   });
   body.querySelector("#atSelectNone")?.addEventListener("click", () => {
@@ -8435,8 +8619,8 @@ function _atSetProg(done, total, msg) {
   prog.innerHTML = `<div>${escapeHtml(msg)} · ${done}/${total}</div><div class="bar"><i style="width:${pct}%"></i></div>`;
 }
 
-function _nowHMS() {
-  const d = new Date();
+function _nowHMS(at) {
+  const d = at == null ? new Date() : new Date(at);
   const p = (n) => String(n).padStart(2, "0");
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
@@ -8547,6 +8731,144 @@ function _atPhaseLabel(phase) {
     "fail-focus": "失败",
     restore: "回收",
   })[phase] || phase;
+}
+
+/**
+ * @brief Comma-separated device IDs involved in a cycle
+ * @param[in] cycle test cycle
+ * @return device id text or empty
+ */
+function _atCycleDeviceIds(cycle) {
+  const ids = [...new Set(_atCycleAssignments(cycle).map((item) => item.deviceId).filter(Boolean))];
+  if (ids.length) {
+    return ids.join(" · ");
+  }
+  return cycle.deviceId || "";
+}
+
+/**
+ * @brief Append device id(s) to a step title for report display
+ * @param[in] base title prefix
+ * @param[in] cycle test cycle
+ * @return title with device id
+ */
+function _atFrameTitleWithDevice(base, cycle) {
+  const ids = _atCycleDeviceIds(cycle);
+  return ids ? `${base} · ${ids}` : base;
+}
+
+/**
+ * @brief Whether any assignment in this cycle failed to issue
+ * @param[in] cycle test cycle
+ * @return true if issue failed
+ */
+function _atIssueFailed(cycle) {
+  return (cycle.issued || []).some((item) => item.ok === false);
+}
+
+/**
+ * @brief CSS class for per-step pass/fail frame border
+ * @param[in] frame captured frame
+ * @return is-ok or is-fail
+ */
+function _atFrameStepClass(frame) {
+  if (frame?.stepOk === false || frame?.emphasis === "fail") {
+    return "is-fail";
+  }
+  if (frame?.stepOk === true) {
+    return "is-ok";
+  }
+  if (frame?.phase === "issued") {
+    return _atIssueFailed({ issued: frame.issued || [] }) ? "is-fail" : "is-ok";
+  }
+  if (frame?.phase === "observe" || frame?.phase === "fail-focus") {
+    const results = frame.checkerState || [];
+    return results.some((item) => !item.pass || item.error) ? "is-fail" : "is-ok";
+  }
+  if (frame?.failed) {
+    return "is-fail";
+  }
+  return "is-ok";
+}
+
+/**
+ * @brief Restore device params after a cycle; capture restore frame
+ * @param[in] home active home
+ * @param[in] cycle test cycle
+ * @param[in] orig snapshot before run
+ * @param[in] fieldsToRestore dp keys to restore
+ * @return true if all restores succeeded
+ */
+async function _atRunCycleRestore(home, cycle, orig, fieldsToRestore) {
+  let restoreOk = true;
+  for (const assignment of _atCycleAssignments(cycle)) {
+    const dev = (home.devices || []).find((item) => item.uid === assignment.uid);
+    if (!dev || !Object.keys(assignment.params || {}).length) {
+      continue;
+    }
+    for (const key of fieldsToRestore) {
+      dev.drafts[key] = orig[assignment.uid]?.[key] || "";
+    }
+    try {
+      const ok = await issueDevice(home, dev, { batch: true });
+      if (!ok) {
+        restoreOk = false;
+      }
+    } catch (_) {
+      restoreOk = false;
+    }
+  }
+  await _atCaptureFrame(home, cycle, "restore", {
+    title: _atFrameTitleWithDevice("5. 结果回收", cycle),
+    readScope: "family",
+    stepOk: restoreOk,
+    issued: _atCycleAssignments(cycle).map((assignment) => ({
+      device: assignment.device,
+      deviceId: assignment.deviceId,
+      target: assignment.target,
+      params: orig[assignment.uid] || {},
+      from: { ...(assignment.params || {}) },
+      ok: restoreOk,
+    })),
+    note: restoreOk ? "已恢复本用例涉及设备的原始参数。" : "部分设备参数回收失败，请人工核对。",
+  });
+  return restoreOk;
+}
+
+/**
+ * @brief Build checker-style rows when issue step failed (skip observe)
+ * @param[in] cycle test cycle
+ * @return result rows
+ */
+function _atResultsFromIssueFail(cycle) {
+  return _atCycleAssignments(cycle).map((assignment) => {
+    const issuedItem = (cycle.issued || []).find((item) => item.uid === assignment.uid);
+    const failed = issuedItem?.ok === false;
+    return {
+      uid: assignment.uid,
+      device: assignment.device,
+      deviceId: assignment.deviceId,
+      role: "target",
+      params: assignment.params,
+      target: assignment.target,
+      coverageKey: assignment.coverageKey,
+      theory: "—",
+      actLabel: "—",
+      actOrder: "—",
+      actPower: null,
+      hitTarget: false,
+      expOrder: "—",
+      expPower: null,
+      pass: !failed,
+      error: failed ? (issuedItem?.err || "下发失败") : null,
+      failTags: failed ? ["下发失败"] : [],
+      masterPass: null,
+      masterNote: failed ? (issuedItem?.err || "下发失败") : "",
+      l1Formula: "下发失败，未检查 L1",
+      l2Formula: "下发失败，未检查 L2",
+      failStage: failed ? "issue" : "ok",
+    };
+  }).filter(Boolean);
 }
 
 function _atW(value) {
@@ -8798,9 +9120,25 @@ function _atFrameOneLiner(frame) {
     return `PV ${_atW(frame.homeFlow.pvTotal)} · Bypass ${_atW(frame.homeFlow.bypass)}`;
   }
   if (frame.phase === "observe" || frame.phase === "fail-focus") {
-    const results = frame.checkerState || [];
-    const failN = results.filter((item) => !item.pass || item.error).length;
-    return failN ? `${failN}/${results.length} 台失败` : `${results.length} 台通过`;
+    const l3 = frame.masterExpect?.l3 || (frame.homeFlow ? _atEvalFamilyL3(frame.homeFlow) : null);
+    const stats = _atCheckerStageStats(frame.checkerState || [], l3);
+    const parts = [];
+    if (stats.issueFail) {
+      parts.push(`下发✗${stats.issueFail}`);
+    }
+    if (stats.l1Fail) {
+      parts.push(`L1✗${stats.l1Fail}`);
+    }
+    if (stats.l2Fail) {
+      parts.push(`L2✗${stats.l2Fail}`);
+    }
+    if (stats.l3Fail) {
+      parts.push("L3✗");
+    }
+    if (!parts.length) {
+      return stats.total ? `${stats.total} 台通过` + (l3 && l3.pass !== false ? " · L3✓" : "") : "检查通过";
+    }
+    return `${parts.join(" · ")} / ${stats.total}`;
   }
   if (frame.phase === "restore") {
     return "已恢复下发前参数";
@@ -8832,7 +9170,7 @@ function _atFailTags(r) {
   if (r.error) {
     tags.push("下发失败");
   }
-  if (!r.hitTarget) {
+  if (_atIsL1Row(r) && !r.hitTarget) {
     tags.push("工况未中");
   }
   if (r.masterPass === false) {
@@ -8859,7 +9197,7 @@ function _atFailReason(r) {
   if (r.error) {
     lines.push(`下发失败：${r.error}`);
   }
-  if (!r.hitTarget) {
+  if (_atIsL1Row(r) && !r.hitTarget) {
     lines.push(`工况未中：目标 ${r.target || "—"}，读回 ${r.theory || "—"}`);
   }
   if (r.masterPass === false) {
@@ -8889,46 +9227,1167 @@ function _atSortChecker(results) {
   });
 }
 
-function _atCheckerTableHtml(results) {
-  const list = _atSortChecker(results);
+function _atWattTerm(name, w, note) {
+  return { name: String(name || "—"), w: Math.round(Number(w) || 0), note: note || "" };
+}
+
+function _atJoinWattTerms(terms, keepZero) {
+  const list = keepZero
+    ? (terms || [])
+    : (terms || []).filter((item) => item && Number(item.w) !== 0);
+  if (!list.length) {
+    return "0";
+  }
+  return list.map((item) => `${item.name} ${item.w}W`).join(" + ");
+}
+
+/**
+ * Snapshot L2 cluster inputs plus per-device substitution terms for checker formulas.
+ * @param[in] expect computeMasterExpect result
+ * @param[in] home active home
+ * @return brief object or null
+ */
+function _atExpectMetaBrief(expect, home) {
+  if (!expect) {
+    return null;
+  }
+  const pvTerms = [];
+  const loadTerms = [];
+  const microTerms = [];
+  const chg1Terms = [];
+  const disTerms = [];
+  for (const d of home?.devices || []) {
+    const name = d.name || d.deviceId || "—";
+    const pv = typeof _ownerPvW === "function" ? _ownerPvW(d) : Math.max(0, Number(d.values?.pv_power_total) || 0);
+    const og = typeof _ownerBypassW === "function"
+      ? _ownerBypassW(d)
+      : Number(d.values?.offgrid1_export_power ?? d.values?.battery_charging_power_grid) || 0;
+    pvTerms.push(_atWattTerm(name, pv, "DP20 pv_power_total"));
+    if (og > 0) {
+      loadTerms.push(_atWattTerm(name, og, "DP38 offgrid1_export_power>0"));
+    } else if (og < 0) {
+      microTerms.push(_atWattTerm(name, -og, "DP38 负值（三方倒灌）"));
+    }
+    const o = typeof classifyOwnerWorkModel === "function" ? classifyOwnerWorkModel(d) : null;
+    const cat = o && typeof _atCat === "function" ? _atCat(o.label) : "";
+    if (cat === "chg1") {
+      chg1Terms.push(_atWattTerm(`${name}[${o.label}]`, o.chgCapW, "chgCapW"));
+    }
+    if (cat === "cc" || cat === "candis") {
+      disTerms.push(_atWattTerm(`${name}[${o.label}]`, o.dchgCapW, "dchgCapW"));
+    }
+  }
+  const microSum = expect.agg?.microSum;
+  const tpvIsManual = expect.tpv != null && Number(expect.tpv) !== Number(microSum || 0);
+  return {
+    chg1Need: expect.chg1Need,
+    disCap: expect.disCap,
+    tpv: expect.tpv,
+    gridBuyLimit: expect.gridBuyLimit,
+    chg2Suppressed: !!expect.chg2Suppressed,
+    supp2c1: !!expect.supp2c1,
+    supp2c2: !!expect.supp2c2,
+    agg: expect.agg ? { ...expect.agg } : null,
+    pvTerms,
+    loadTerms,
+    microTerms,
+    chg1Terms,
+    disTerms,
+    tpvSource: tpvIsManual ? "手动 #atTpv" : "默认 = bypass 负值合计 microSum",
+  };
+}
+
+/** Min simultaneous AC charge & discharge (W) to flag 边充边放 */
+const AT_L3_BOTH_EPS_W = 50;
+
+/**
+ * @brief Family-level L3: reverse flow + AC both-way charge/discharge
+ * @param[in] flow from _atHomeFlow
+ * @return l3 snapshot
+ * @note gridW>0=取电, gridW<0=馈网(逆流)；与报告页流向文案一致
+ */
+function _atEvalFamilyL3(flow) {
+  const f = flow || {};
+  const gridW = f.gridW == null || !Number.isFinite(Number(f.gridW)) ? null : Number(f.gridW);
+  const actChg = Math.max(0, Math.round(Number(f.actChg) || 0));
+  const actDchg = Math.max(0, Math.round(Number(f.actDchg) || 0));
+  const reverseFlow = gridW != null && gridW < 0;
+  const reverseW = reverseFlow ? Math.round(-gridW) : 0;
+  const reversePass = gridW == null ? null : !reverseFlow;
+  const bothWay = actChg > AT_L3_BOTH_EPS_W && actDchg > AT_L3_BOTH_EPS_W;
+  const bothPass = !bothWay;
+  const pass = reversePass !== false && bothPass;
+  return {
+    gridW,
+    gridKnown: gridW != null,
+    actChg,
+    actDchg,
+    reverseFlow,
+    reverseW,
+    reversePass,
+    bothWay,
+    bothPass,
+    bothEps: AT_L3_BOTH_EPS_W,
+    pass,
+  };
+}
+
+/**
+ * @brief Foldable section shell for L1/L2/L3
+ */
+function _atChkFoldSecHtml(no, title, hint, bodyHtml, opts) {
+  opts = opts || {};
+  const fail = !!opts.fail;
+  const open = opts.open !== false;
+  const badge = opts.badge || "";
+  return `<section class="at-chk-sec ${fail ? "is-fail" : ""} ${open ? "" : "is-collapsed"}" data-chk-fold-sec="1">` +
+    `<button type="button" class="at-chk-sec-head at-chk-fold-hit" data-chk-fold="1" aria-expanded="${open ? "true" : "false"}">` +
+      `<span class="at-chk-sec-no">${escapeHtml(String(no))}</span>` +
+      `<b>${escapeHtml(title)}</b>` +
+      (hint ? `<span class="hint">${hint}</span>` : "") +
+      badge +
+      `<span class="at-chk-fold-chevron" aria-hidden="true"></span>` +
+    `</button>` +
+    `<div class="at-chk-sec-body">${bodyHtml}</div>` +
+  `</section>`;
+}
+
+/**
+ * @brief Per-layer pass/fail counts for checker summary bar
+ * @param[in] results checker rows
+ * @param[in] l3 optional family L3
+ * @return stage stats object
+ */
+function _atIsL1Row(r) {
+  return r && r.role !== "peer";
+}
+
+function _atCheckerStageStats(results, l3) {
+  const list = results || [];
+  const l1List = list.filter(_atIsL1Row);
+  const total = list.length;
+  const issueFail = list.filter((r) => !!r.error).length;
+  const l1Fail = l1List.filter((r) => !r.error && !r.hitTarget).length;
+  const l1Ok = l1List.filter((r) => !r.error && r.hitTarget).length;
+  const l2Judged = list.filter((r) => !r.error && r.masterPass !== null);
+  const l2Fail = l2Judged.filter((r) => r.masterPass === false).length;
+  const l2Ok = l2Judged.filter((r) => r.masterPass === true).length;
+  const l2Ref = list.filter((r) => !r.error && r.masterPass === null).length;
+  const pass = list.filter((r) => r.pass).length;
+  const l3Fail = l3 && l3.pass === false ? 1 : 0;
+  const deviceFail = total - pass;
+  return {
+    total,
+    issueFail,
+    l1Fail,
+    l1Ok,
+    l2Fail,
+    l2Ok,
+    l2Ref,
+    l2Judged: l2Judged.length,
+    l3Fail,
+    l3Pass: l3 ? l3.pass !== false : null,
+    pass,
+    overallFail: deviceFail + l3Fail,
+  };
+}
+
+/**
+ * @brief Which layer caused failure for one checker row
+ * @param[in] r result row
+ * @return issue | l1 | l2 | ok
+ */
+function _atResultFailStage(r) {
+  if (r?.error) {
+    return "issue";
+  }
+  if (_atIsL1Row(r) && !r?.hitTarget) {
+    return "l1";
+  }
+  if (r?.masterPass === false) {
+    return "l2";
+  }
+  return "ok";
+}
+
+function _atCheckerStageChip(label, formula, state, detail) {
+  const stateCls = state === "fail" ? "is-fail" : (state === "skip" ? "is-skip" : "is-ok");
+  const badge = state === "fail"
+    ? `<span class="at-badge at-fail">失败</span>`
+    : (state === "skip"
+      ? `<span class="at-badge at-skip">跳过/参考</span>`
+      : `<span class="at-badge at-pass">通过</span>`);
+  return `<div class="at-stage-chip ${stateCls}">` +
+    `<div class="at-stage-chip-head"><span class="at-stage-chip-title">${escapeHtml(label)}</span>${badge}</div>` +
+    `<div class="at-stage-chip-formula">${formula}</div>` +
+    (detail ? `<div class="at-stage-chip-detail">${detail}</div>` : "") +
+  `</div>`;
+}
+
+/**
+ * @brief Top summary: which stage failed at a glance
+ * @param[in] stats from _atCheckerStageStats
+ * @return html
+ */
+function _atCheckerStageBarHtml(stats) {
+  if (!stats || !stats.total) {
+    return "";
+  }
+  const issueState = stats.issueFail ? "fail" : "ok";
+  const l1State = stats.issueFail ? "skip" : (stats.l1Fail ? "fail" : "ok");
+  const l2State = stats.issueFail ? "skip" : (stats.l2Fail ? "fail" : "ok");
+  const overallState = stats.overallFail ? "fail" : "ok";
+  return `<div class="at-checker-stage-bar">` +
+    _atCheckerStageChip(
+      "Layer 0 · 下发",
+      "issueDevice 成功",
+      issueState,
+      stats.issueFail ? `${stats.issueFail}/${stats.total} 台下发失败` : `${stats.total} 台已下发`
+    ) +
+    `<span class="at-stage-arrow">→</span>` +
+    _atCheckerStageChip(
+      "L1 · 从机工况",
+      "hitTarget = (读回态 === 目标态)；读回态 = MCU if/else 首次命中（S1故障/bat0 → … → S8 SoC≤备用−5 充电2 → …）",
+      l1State,
+      stats.issueFail
+        ? "下发失败，未检查"
+        : (stats.l1Fail ? `${stats.l1Fail}/${stats.total} 台工况未中` : `${stats.l1Ok}/${stats.total} 台命中`)
+    ) +
+    `<span class="at-stage-arrow">→</span>` +
+    _atCheckerStageChip(
+      "L2 · 主机分配",
+      "①方向一致：实际order==期望order；②功率落在允许区间[下限,上限]内；两项都真才通过",
+      l2State,
+      stats.issueFail
+        ? "未检查"
+        : (stats.l2Fail
+          ? `${stats.l2Fail}/${stats.l2Judged} 台硬判失败`
+          : (stats.l2Judged
+            ? `${stats.l2Ok}/${stats.l2Judged} 台通过`
+            : `${stats.l2Ref} 台仅参考（不硬判）`))
+    ) +
+    `<span class="at-stage-arrow">→</span>` +
+    _atCheckerStageChip(
+      "综合",
+      "L1 命中 且 L2 ≠ 失败（L2 参考不计失败）",
+      overallState,
+      stats.overallFail ? `${stats.overallFail}/${stats.total} 台未通过` : `${stats.pass}/${stats.total} 台通过`
+    ) +
+  `</div>`;
+}
+
+/**
+ * @brief Cluster context formulas shown under checker stage bar
+ * @param[in] expectMeta brief expect snapshot
+ * @return html
+ */
+function _atFormulaLine(name, formula, subst, result, extra = {}) {
+  const tone = extra.tone || "";
+  const span = extra.span ? " is-wide" : "";
+  const action = extra.action || "";
+  return `<div class="at-fx-card${span}${tone ? ` is-${tone}` : ""}">` +
+    `<div class="at-fx-name">${escapeHtml(name)}</div>` +
+    (result != null && result !== "" ? `<div class="at-fx-res">${escapeHtml(String(result))}</div>` : "") +
+    (action ? `<div class="at-fx-action"><span class="at-fx-action-k">主机动作</span>${escapeHtml(action)}</div>` : "") +
+    `<div class="at-fx-eq">${escapeHtml(formula)}</div>` +
+    (subst ? `<div class="at-fx-sub">${escapeHtml(subst)}</div>` : "") +
+  `</div>`;
+}
+
+/**
+ * @brief Host DP98 action table under current chg2-suppress flag
+ * @param[in] suppressed whether charge-2 suppress is on
+ * @return html wide card
+ */
+function _atL2ActionSheetHtml(suppressed) {
+  const rows = suppressed
+    ? [
+      ["充电1", "下发「充」", "强制充，不受抑制"],
+      ["充电2", "压成「待机」", "不给充"],
+      ["可放 / 可充可放", "压成「待机」", "也不下发放电"],
+      ["放电", "下发「放」", "防弃光"],
+      ["可充", "不硬判", "看家庭盈余"],
+      ["禁充禁放", "下发「待机」", "0W"],
+    ]
+    : [
+      ["充电1", "下发「充」", "强制充"],
+      ["充电2", "下发「充」", "允许充"],
+      ["可放 / 可充可放", "不硬判", "看家庭盈余"],
+      ["放电", "下发「放」", "防弃光"],
+      ["可充", "不硬判", "看家庭盈余"],
+      ["禁充禁放", "下发「待机」", "0W"],
+    ];
+  const body = rows.map(([state, act, why]) =>
+    `<div class="at-fx-act-row">` +
+      `<span class="at-fx-act-state">${escapeHtml(state)}</span>` +
+      `<span class="at-fx-act-do">${escapeHtml(act)}</span>` +
+      `<span class="at-fx-act-why">${escapeHtml(why)}</span>` +
+    `</div>`
+  ).join("");
+  return `<div class="at-chk-action-sheet ${suppressed ? "is-warn" : "is-ok"}">` +
+    `<div class="at-chk-action-cap">${suppressed ? "充2抑制 = 开 → 各态主机动作" : "充2抑制 = 关 → 各态主机动作"}</div>` +
+    `<div class="at-fx-act-table">${body}</div>` +
+  `</div>`;
+}
+
+function _atCheckerClusterHtml(expectMeta) {
+  const wrap = (inner) =>
+    `<div class="at-checker-cluster">` +
+      `<div class="at-fx-title">L2 簇级公式（整家庭，不只被测机）</div>` +
+      `<div class="at-fx-grid">${inner}</div>` +
+    `</div>`;
+  if (!expectMeta) {
+    return wrap(
+      _atFormulaLine("PV总", "Σ 各机 DP20 pv_power_total", "", "—", { action: "只作家庭能量背景，不直接改 DP98" }) +
+      _atFormulaLine("Bypass负载", "Σ 各机 DP38（>0 的部分）", "", "—", { action: "只作背景" }) +
+      _atFormulaLine("三方光伏 tpv", "手动 #atTpv，缺省 = Σ |DP38<0|", "", "—", { action: "参与充2抑制不等式" }) +
+      _atFormulaLine("充1需求", "Σ 读回态=充电1 的 chgCapW", "", "—", { action: "需求越大，越容易触发充2抑制" }) +
+      _atFormulaLine("可放总", "Σ 读回态∈{可充可放,可放} 的 dchgCapW", "", "—", { action: "可放能力不够 → 抑制充2" }) +
+      _atFormulaLine("充2抑制", "chg1Need > disCap+tpv  或  chg1Need > gridBuyLimit+tpv", "", "—", {
+        action: "开：充电2/可放/可充可放 → 待机；关：充电2 → 充",
+        span: true,
+      })
+    );
+  }
+  const gridConfigured = expectMeta.gridBuyLimit != null && expectMeta.gridBuyLimit !== "";
+  const gridNum = gridConfigured ? Number(expectMeta.gridBuyLimit) : NaN;
+  const gridTxt = Number.isFinite(gridNum) ? `${gridNum}W` : "未配置（条件1不计）";
+  const pvSub = _atJoinWattTerms(expectMeta.pvTerms, true);
+  const loadSub = _atJoinWattTerms(expectMeta.loadTerms);
+  const microSub = _atJoinWattTerms(expectMeta.microTerms);
+  const chg1Sub = _atJoinWattTerms(expectMeta.chg1Terms);
+  const disSub = _atJoinWattTerms(expectMeta.disTerms);
+  const c1 = Number(expectMeta.chg1Need) || 0;
+  const dis = Number(expectMeta.disCap) || 0;
+  const tpv = Number(expectMeta.tpv) || 0;
+  const left2 = `${c1} > ${dis} + ${tpv} → ${c1} > ${dis + tpv}`;
+  const left1 = Number.isFinite(gridNum)
+    ? `${c1} > ${gridNum} + ${tpv} → ${c1} > ${gridNum + tpv}`
+    : "电网购电限未配置，条件1不计";
+  const suppressRes = expectMeta.chg2Suppressed
+    ? `是（${expectMeta.supp2c2 ? "条件2" : "条件1"}）`
+    : "否";
+  const suppressAction = expectMeta.chg2Suppressed
+    ? "主机动作：凡读回「充电2」→ DP98 下发待机(不充)；凡读回「可放/可充可放」→ 也不下发放电，压成待机。充电1仍强制充，放电仍可放。"
+    : "主机动作：读回「充电2」→ 允许下发充；「可放/可充可放」方向不硬判（看家庭盈余）。";
+  return wrap(
+    _atFormulaLine("PV总", "Σ 各机 DP20 pv_power_total", pvSub, `${expectMeta.agg?.pvTotal ?? 0}W`, {
+      action: "背景量：描述家庭光伏总量，不直接改某台 DP98",
+    }) +
+    _atFormulaLine("Bypass负载", "Σ 各机 DP38（仅 >0）", loadSub, `${expectMeta.agg?.loadSum ?? 0}W`, {
+      action: "背景量：家庭旁路负载合计",
+    }) +
+    _atFormulaLine("三方光伏 tpv", "手动 #atTpv；缺省 Σ |DP38<0|", `${expectMeta.tpvSource || ""} · ${microSub}`, `${tpv}W`, {
+      action: "参与抑制不等式：可抵消一部分充1需求",
+    }) +
+    _atFormulaLine("充1需求", "Σ 充电1.chgCapW", chg1Sub, `${c1}W`, {
+      action: c1 > 0
+        ? `行动含义：家里有充电1 共需约 ${c1}W，主机必须优先满足这些机充电`
+        : "行动含义：当前没有充电1，抑制不易触发",
+    }) +
+    _atFormulaLine("可放总", "Σ {可充可放,可放}.dchgCapW", disSub, `${dis}W`, {
+      action: dis > 0
+        ? `行动含义：可用放电余量约 ${dis}W，用来支撑充1；不够就会抑制充2`
+        : "行动含义：没有可放余量 → 充1 只能靠电网/三方，易触发充2抑制",
+    }) +
+    _atFormulaLine("电网购电限", "手动 #atGridBuyLimit（非设备 DP）", "", gridTxt, {
+      action: Number.isFinite(gridNum)
+        ? `行动含义：家庭购电最多 ${gridNum}W，超过则条件1抑制充2`
+        : "行动含义：未配置则条件1不参与判定",
+    }) +
+    _atFormulaLine("抑制条件2", "chg1Need > disCap + tpv", left2, expectMeta.supp2c2 ? "真" : "假", {
+      tone: expectMeta.supp2c2 ? "warn" : "ok",
+      action: expectMeta.supp2c2
+        ? "行动：可放+三方撑不住充1 → 打开充2抑制"
+        : "行动：可放+三方够用 → 本条件不抑制",
+    }) +
+    _atFormulaLine("抑制条件1", "chg1Need > gridBuyLimit + tpv", left1, expectMeta.supp2c1 ? "真" : "假", {
+      tone: expectMeta.supp2c1 ? "warn" : "ok",
+      action: expectMeta.supp2c1
+        ? "行动：购电限+三方撑不住充1 → 打开充2抑制"
+        : "行动：本条件未触发（未配置或不成立）",
+    }) +
+    _atFormulaLine("充2抑制", "supp2c1 || supp2c2", `${!!expectMeta.supp2c1} || ${!!expectMeta.supp2c2}`, suppressRes, {
+      tone: expectMeta.chg2Suppressed ? "warn" : "ok",
+      action: suppressAction,
+      span: true,
+    }) +
+    _atL2ActionSheetHtml(!!expectMeta.chg2Suppressed) +
+    _atFormulaLine(
+      "L2 怎么判通过",
+      "① 方向：DP98 实际 order 必须等于上表「主机动作」；② 功率：实际功率必须落在「允许功率区间」内（例如充电1 期望400W时，允许 240~700W，不是必须刚好400）",
+      "例：期望充/400W，允许区间[240,700]W，实际充/400W → 方向对且400落在区间内 → L2 通过",
+      "方向对 + 功率落在允许区间",
+      { span: true }
+    )
+  );
+}
+
+function _atCheckerStageBadge(r) {
+  const stage = _atResultFailStage(r);
+  if (stage === "issue") {
+    return `<span class="at-badge at-fail">下发</span>`;
+  }
+  if (stage === "l1") {
+    return `<span class="at-badge at-fail">L1</span>`;
+  }
+  if (stage === "l2") {
+    return `<span class="at-badge at-fail">L2</span>`;
+  }
+  return `<span class="at-badge at-pass">—</span>`;
+}
+
+function _atCheckerL1Cell(r) {
+  const formula = r.l1Formula || `hitTarget = (读回态 === 目标态) = (${r.theory || "—"} ${r.hitTarget ? "==" : "!="} ${r.target || "—"})`;
+  return `<div class="at-checker-formula">${escapeHtml(formula)}</div>`;
+}
+
+function _atCheckerL2BandHtml(r) {
+  if (!Array.isArray(r.expBand) || r.expBand.length < 2) {
+    return "";
+  }
+  const lo = Number(r.expBand[0]);
+  const hi = Number(r.expBand[1]);
+  const act = r.actPower == null ? null : Number(r.actPower);
+  const inBand = act != null && Number.isFinite(act) && Number.isFinite(lo) && Number.isFinite(hi)
+    && act >= lo && act <= hi;
+  let marker = "";
+  if (act != null && Number.isFinite(act) && Number.isFinite(lo) && Number.isFinite(hi) && hi > lo) {
+    const pct = Math.max(0, Math.min(100, ((act - lo) / (hi - lo)) * 100));
+    marker = `<span class="at-band-mark ${inBand ? "is-ok" : "is-fail"}" style="left:${pct}%" title="实际 ${act}W"></span>`;
+  }
+  return `<div class="at-band-box ${inBand ? "is-ok" : (act == null ? "" : "is-fail")}">` +
+    `<div class="at-band-title">允许功率区间（不是单点）</div>` +
+    `<div class="at-band-range"><b>${lo}</b>W ～ <b>${hi}</b>W</div>` +
+    `<div class="at-band-track">${marker}</div>` +
+    `<div class="at-band-act">${act == null
+      ? "实际功率：未读到"
+      : `实际功率：<b>${act}W</b> ${inBand ? "✓ 落在区间内" : "✗ 超出区间"}`}</div>` +
+  `</div>`;
+}
+
+function _atCheckerL2Cell(r) {
+  if (r.error) {
+    return `<span class="hint">下发失败，未检查</span>`;
+  }
+  if (r.masterPass === null) {
+    return `<div class="at-checker-formula hint">${escapeHtml(r.l2Formula || r.masterNote || "参考不硬判")}</div>`;
+  }
+  const dirOk = r.actOrder === r.expOrder;
+  const head =
+    `<div class="at-checker-formula">` +
+      `① 方向：期望「${escapeHtml(r.expOrder || "—")}」· 实际「${escapeHtml(r.actOrder || "—")}」→ ${dirOk ? "一致" : "不符"}` +
+    `</div>` +
+    _atCheckerL2BandHtml(r) +
+    (r.l2Formula ? `<div class="at-checker-formula hint">${escapeHtml(r.l2Formula)}</div>` : "");
+  return head;
+}
+
+function _atPassBadge(ok, softLabel, hitAttrs) {
+  const attrs = hitAttrs || "";
+  if (ok === null) {
+    return `<button type="button" class="at-badge at-skip at-pass-hit" ${attrs} title="点击查看判定">${escapeHtml(softLabel || "参考")}</button>`;
+  }
+  return ok
+    ? `<button type="button" class="at-badge at-pass at-pass-hit" ${attrs} title="点击查看怎么算的">通过</button>`
+    : `<button type="button" class="at-badge at-fail at-pass-hit" ${attrs} title="点击查看怎么算的">失败</button>`;
+}
+
+/**
+ * @brief Six home metrics used by L2, with formula + substitution
+ * @param[in] expectMeta brief expect snapshot
+ * @return metric defs
+ */
+function _atHomeMetricDefs(expectMeta) {
+  const m = expectMeta || {};
+  const gridConfigured = m.gridBuyLimit != null && m.gridBuyLimit !== "";
+  const gridNum = gridConfigured ? Number(m.gridBuyLimit) : NaN;
+  const c1 = Number(m.chg1Need) || 0;
+  const dis = Number(m.disCap) || 0;
+  const tpv = Number(m.tpv) || 0;
+  return [
+    {
+      id: "pv",
+      name: "PV总",
+      value: `${m.agg?.pvTotal ?? 0}W`,
+      short: "Σ DP20",
+      formula: "PV总 = Σ 各机 DP20 pv_power_total",
+      subst: _atJoinWattTerms(m.pvTerms, true),
+      note: "家庭光伏合计，只作背景，不直接改 DP98",
+    },
+    {
+      id: "bypass",
+      name: "Bypass负载",
+      value: `${m.agg?.loadSum ?? 0}W`,
+      short: "Σ DP38>0",
+      formula: "Bypass负载 = Σ 各机 DP38 offgrid1_export_power（仅取 >0）",
+      subst: _atJoinWattTerms(m.loadTerms) || "0（没有正 Bypass）",
+      note: "旁路口负载合计",
+    },
+    {
+      id: "tpv",
+      name: "三方光伏",
+      value: `${tpv}W`,
+      short: "#atTpv 或 Σ|DP38<0|",
+      formula: "tpv = 手动 #atTpv；若未填，则 = Σ |DP38<0|（microSum）",
+      subst: `${m.tpvSource || "默认"}；microSum 代入 ${_atJoinWattTerms(m.microTerms) || "0"}`,
+      note: "参与充2抑制不等式，可抵消一部分充1需求",
+    },
+    {
+      id: "chg1",
+      name: "充1总",
+      value: `${c1}W`,
+      short: "Σ 充电1.chgCapW",
+      formula: "充1总 = Σ 读回态=充电1 的设备 chgCapW",
+      subst: _atJoinWattTerms(m.chg1Terms) || "0（当前没有充电1）",
+      note: "主机必须优先满足的强充需求",
+    },
+    {
+      id: "dis",
+      name: "可放总",
+      value: `${dis}W`,
+      short: "Σ 可放/可充可放.dchgCapW",
+      formula: "可放总 = Σ 读回态∈{可放, 可充可放} 的 dchgCapW",
+      subst: _atJoinWattTerms(m.disTerms) || "0（当前没有可放机）",
+      note: "用来支撑充1；不够就会触发充2抑制",
+    },
+    {
+      id: "grid",
+      name: "电网购电限",
+      value: Number.isFinite(gridNum) ? `${gridNum}W` : "未配置",
+      short: "#atGridBuyLimit",
+      formula: "电网购电限 = 手动 #atGridBuyLimit（固件规划中，不是设备 DP）",
+      subst: Number.isFinite(gridNum) ? `已配置 ${gridNum}W` : "未配置 → 抑制条件1不计",
+      note: "仅用于抑制条件1：充1总 > 购电限 + 三方",
+    },
+  ];
+}
+
+/**
+ * @brief L1 section: only devices this case actually targeted
+ */
+function _atCheckerL1SectionHtml(results) {
+  const rows = _atSortChecker((results || []).filter(_atIsL1Row)).map((r) => {
+    const ok = !r.error && !!r.hitTarget;
+    const fail = !ok;
+    const uid = r.uid || r.deviceId || "";
+    return `<tr class="${fail ? "is-fail" : ""}">` +
+      `<td>` +
+        `<div class="at-dev-name">${escapeHtml(r.device || "—")}</div>` +
+        (r.deviceId ? `<div class="at-dev-id mono">${escapeHtml(r.deviceId)}</div>` : "") +
+      `</td>` +
+      `<td>${_atModelChipHtml(r.target)}</td>` +
+      `<td>${_atModelChipHtml(r.theory)}${r.error ? `<div class="at-fail-text">${escapeHtml(r.error)}</div>` : ""}</td>` +
+      `<td>${_atPassBadge(r.error ? false : ok, null, `data-chk-pass="l1" data-uid="${escapeAttr(String(uid))}"`)}</td>` +
+    `</tr>`;
+  }).join("");
+  const l1List = (results || []).filter(_atIsL1Row);
+  const l1Fail = l1List.some((r) => r.error || !r.hitTarget);
+  const body =
+    `<table class="at-checker-table at-chk-simple"><thead><tr>` +
+      `<th>设备</th><th>目标</th><th>读回</th><th>通过？</th>` +
+    `</tr></thead><tbody>${rows}</tbody></table>`;
+  return _atChkFoldSecHtml(
+    "一",
+    "L1 · 设备工况",
+    "只看本用例目标机 · 点「通过？」弹框",
+    body,
+    {
+      fail: l1Fail,
+      open: l1Fail || !l1List.length,
+      badge: l1Fail
+        ? `<span class="at-badge at-fail">有失败</span>`
+        : `<span class="at-badge at-pass">通过</span>`,
+    }
+  );
+}
+
+/**
+ * @brief L3 family checks: reverse flow + AC both-way
+ */
+function _atCheckerL3SectionHtml(l3) {
+  if (!l3) {
+    return _atChkFoldSecHtml(
+      "三",
+      "L3 · 家庭异常",
+      "本帧无家庭流向，无法判定",
+      `<p class="hint">缺少 homeFlow（旧报告常见）。重新跑测后会有逆流 / 边充边放结果。</p>`,
+      { open: false, badge: `<span class="at-badge at-skip">跳过</span>` }
+    );
+  }
+  const revPass = l3.reversePass;
+  const bothPass = l3.bothPass;
+  const revBadge = revPass === null
+    ? _atPassBadge(null, "无电表", `data-chk-l3="reverse"`)
+    : _atPassBadge(!!revPass, null, `data-chk-l3="reverse"`);
+  const bothBadge = _atPassBadge(!!bothPass, null, `data-chk-l3="both"`);
+  const gridTxt = l3.gridKnown
+    ? (l3.gridW > 0 ? `取电 ${l3.gridW}W` : (l3.gridW < 0 ? `馈网 ${l3.reverseW}W` : `0W`))
+    : "未读到电表/LAN";
+  const body =
+    `<table class="at-checker-table at-chk-simple"><thead><tr>` +
+      `<th>检查项</th><th>读数</th><th>判定式</th><th>通过？</th>` +
+    `</tr></thead><tbody>` +
+      `<tr class="${revPass === false ? "is-fail" : ""}">` +
+        `<td><div class="at-dev-name">逆流（馈网）</div><div class="hint">家庭并网点向外送电</div></td>` +
+        `<td class="mono">${escapeHtml(gridTxt)}</td>` +
+        `<td class="hint">gridW &lt; 0 → 逆流失败；无电表则跳过</td>` +
+        `<td>${revBadge}</td>` +
+      `</tr>` +
+      `<tr class="${bothPass === false ? "is-fail" : ""}">` +
+        `<td><div class="at-dev-name">AC 边充边放</div><div class="hint">集群 DP98 同时有充有放</div></td>` +
+        `<td class="mono">充 ${l3.actChg}W · 放 ${l3.actDchg}W</td>` +
+        `<td class="hint">充 &gt; ${l3.bothEps}W 且 放 &gt; ${l3.bothEps}W → 失败</td>` +
+        `<td>${bothBadge}</td>` +
+      `</tr>` +
+    `</tbody></table>`;
+  const fail = l3.pass === false;
+  return _atChkFoldSecHtml(
+    "三",
+    "L3 · 家庭异常",
+    "逆流 + AC边充边放 · 点「通过？」弹框",
+    body,
+    {
+      fail,
+      open: true,
+      badge: fail
+        ? `<span class="at-badge at-fail">家庭异常</span>`
+        : `<span class="at-badge at-pass">正常</span>`,
+    }
+  );
+}
+
+/**
+ * @brief L2.1 home metrics — click card to see formula
+ */
+function _atCheckerL2HomeHtml(expectMeta) {
+  const defs = _atHomeMetricDefs(expectMeta);
+  const suppress = expectMeta?.chg2Suppressed
+    ? `<button type="button" class="at-badge at-fail at-pass-hit" data-chk-home="suppress" title="点击查看抑制怎么算">充2抑制开</button>`
+    : `<button type="button" class="at-badge at-pass at-pass-hit" data-chk-home="suppress" title="点击查看抑制怎么算">充2抑制关</button>`;
+  return `<div class="at-chk-subhead at-chk-home-hit" data-chk-home="all" role="button" tabindex="0" title="点击弹框查看公式">` +
+      `<span class="at-chk-step">1</span>家庭数据` +
+      `<span class="hint">共 ${defs.length} 种 · 点这里或卡片弹框看公式</span> ${suppress}</div>` +
+    `<div class="at-chk-home-grid">` +
+      defs.map((item) =>
+        `<button type="button" class="at-chk-home-card" data-chk-home="${escapeAttr(item.id)}" title="点击查看怎么算出来的">` +
+          `<div class="k">${escapeHtml(item.name)} <span class="at-chk-more">?</span></div>` +
+          `<div class="v">${escapeHtml(String(item.value))}</div>` +
+          `<div class="s">${escapeHtml(item.short)}</div>` +
+        `</button>`
+      ).join("") +
+    `</div>`;
+}
+
+/**
+ * @brief Build popup lines explaining how L2 power band is derived
+ * @param[in] r checker row
+ * @param[in] expectMeta optional home expect brief
+ * @return explain line objects
+ */
+function _atBandExplainLines(r, expectMeta) {
+  const cat = r.bandCat || (typeof _atCat === "function" ? _atCat(r.theory) : "") || "";
+  const chg = Number(r.chgCapW);
+  const dchg = Number(r.dchgCapW);
+  const lo = Array.isArray(r.expBand) ? r.expBand[0] : null;
+  const hi = Array.isArray(r.expBand) ? r.expBand[1] : null;
+  const suppressed = !!expectMeta?.chg2Suppressed;
+  const lines = [
+    { kind: "note", text: "区间不是固件 DP，是检查器按读回工况给的「允许功率容差」。实际落在区间内即过，不必等于期望点位。" },
+  ];
+  if (cat === "chg1") {
+    const loCalc = Number.isFinite(chg) ? Math.max(0, Math.round(chg * 0.6)) : "?";
+    const hiCalc = Number.isFinite(chg) ? chg + 300 : "?";
+    lines.push(
+      { kind: "eq", text: "充电1：下限 = max(0, round(chgCapW × 0.6))；上限 = chgCapW + 300" },
+      { kind: "sub", text: Number.isFinite(chg) ? `chgCapW=${chg}W → [${loCalc}, ${hiCalc}]` : "缺 chgCapW" },
+      { kind: "note", text: "充电1强制充，容差较宽（60%～+300W）。" }
+    );
+  } else if (cat === "chg2" && suppressed) {
+    lines.push(
+      { kind: "eq", text: "充电2 + 充2抑制开：固定区间 [0, 150]" },
+      { kind: "sub", text: "期望待机 0W，允许少量抖动 ≤150W" },
+      { kind: "note", text: "抑制开时主机不下发充电2。" }
+    );
+  } else if (cat === "chg2") {
+    const loCalc = Number.isFinite(chg) ? Math.max(0, Math.round(chg * 0.4)) : "?";
+    const hiCalc = Number.isFinite(chg) ? chg + 300 : "?";
+    lines.push(
+      { kind: "eq", text: "充电2（未抑制）：下限 = max(0, round(chgCapW × 0.4))；上限 = chgCapW + 300" },
+      { kind: "sub", text: Number.isFinite(chg) ? `chgCapW=${chg}W → [${loCalc}, ${hiCalc}]` : "缺 chgCapW" },
+      { kind: "note", text: "比充电1更松（40% 起）。" }
+    );
+  } else if (cat === "disabled") {
+    lines.push(
+      { kind: "eq", text: "禁充禁放：固定区间 [0, 120]" },
+      { kind: "sub", text: "期望待机 0W" }
+    );
+  } else if (cat === "discharge") {
+    const hiCalc = Number.isFinite(dchg) ? dchg + 300 : "?";
+    lines.push(
+      { kind: "eq", text: "放电：下限 = 0；上限 = dchgCapW + 300" },
+      { kind: "sub", text: Number.isFinite(dchg) ? `dchgCapW=${dchg}W → [0, ${hiCalc}]` : "缺 dchgCapW" }
+    );
+  } else if ((cat === "cc" || cat === "candis") && suppressed) {
+    lines.push(
+      { kind: "eq", text: "可放/可充可放 + 充2抑制开：固定区间 [0, 150]" },
+      { kind: "sub", text: "一充一放：抑制开时对应放电也不下发，期望待机" }
+    );
+  } else if (cat === "cc" || cat === "candis" || cat === "canchg") {
+    lines.push(
+      { kind: "eq", text: "可放/可充可放/可充：方向依赖家庭盈余，L2 不硬判" },
+      { kind: "sub", text: lo != null && hi != null ? `示意区间 [${lo}, ${hi}]（默认占位，不参与成败）` : "无区间" },
+      { kind: "note", text: "标「参考」，实际功率不判过/不过。" }
+    );
+  } else {
+    lines.push(
+      { kind: "eq", text: r.bandFormula || "本态未建模硬判区间" },
+      { kind: "sub", text: lo != null && hi != null ? `当前 [${lo}, ${hi}]` : "—" }
+    );
+  }
+  if (lo != null && hi != null) {
+    const act = r.actPower;
+    const hasAct = act != null && Number.isFinite(Number(act));
+    const inBand = hasAct && Number(act) >= lo && Number(act) <= hi;
+    lines.push(
+      { kind: "res", text: `本机区间 ${lo} ~ ${hi} W` + (hasAct ? ` · 实际 ${Math.round(Number(act))}W → ${inBand ? "落在区间内" : "在区间外"}` : " · 无实测") }
+    );
+  }
+  return lines;
+}
+
+/**
+ * @brief Horizontal range bar with actual-power marker (on-bar vs off-bar)
+ * @param[in] lo band min watts
+ * @param[in] hi band max watts
+ * @param[in] act actual watts or null
+ * @param[in] skipped true when L2 not judged
+ * @param[in] hitAttrs optional click attrs for popup
+ * @return html
+ */
+function _atPowerBandBarHtml(lo, hi, act, skipped, hitAttrs) {
+  if (lo == null || hi == null || !Number.isFinite(Number(lo)) || !Number.isFinite(Number(hi))) {
+    return `<span class="hint">—</span>`;
+  }
+  const min = Number(lo);
+  const max = Number(hi);
+  const span = Math.max(1, max - min);
+  const g = 16;
+  const bandW = 100 - g * 2;
+  let pct = null;
+  let inBand = false;
+  let hasAct = act != null && act !== "" && Number.isFinite(Number(act));
+  if (hasAct) {
+    const w = Number(act);
+    inBand = w >= min && w <= max;
+    if (inBand) {
+      pct = g + bandW * ((w - min) / span);
+    } else if (w < min) {
+      const t = Math.min(1, (min - w) / span);
+      pct = Math.max(2, g - 4 - t * (g - 6));
+    } else {
+      const t = Math.min(1, (w - max) / span);
+      pct = Math.min(98, 100 - g + 4 + t * (g - 6));
+    }
+  }
+  const cls = skipped ? "is-skip" : (hasAct ? (inBand ? "is-ok" : "is-out") : "is-skip");
+  const title = hasAct
+    ? `允许 ${min}~${max}W · 实际 ${Number(act)}W · ${inBand ? "在区间内" : "在区间外"} · 点击看公式`
+    : `允许 ${min}~${max}W · 无实际功率 · 点击看公式`;
+  const attrs = hitAttrs || "";
+  return `<button type="button" class="at-pbar ${cls} at-pbar-hit" ${attrs} title="${escapeAttr(title)}">` +
+    `<div class="at-pbar-track">` +
+      `<i class="at-pbar-axis"></i>` +
+      `<i class="at-pbar-band"></i>` +
+      (pct == null ? "" : `<i class="at-pbar-dot ${inBand ? "is-in" : "is-out"}" style="left:${pct.toFixed(1)}%"></i>`) +
+    `</div>` +
+    `<div class="at-pbar-lab">` +
+      `<span>${min}</span>` +
+      `<span class="act">${hasAct ? `${Math.round(Number(act))}W${inBand ? "" : " · 区间外"}` : (skipped ? "不硬判" : "无实测")}</span>` +
+      `<span>${max}</span>` +
+    `</div>` +
+  `</button>`;
+}
+function _atCheckerL2ExecHtml(results) {
+  const list = results || [];
+  const judged = list.filter((r) => !r.error && r.masterPass !== null);
+  const failN = judged.filter((r) => r.masterPass === false).length;
+  const okN = judged.filter((r) => r.masterPass === true).length;
+  const refN = list.filter((r) => !r.error && r.masterPass === null).length;
+  const peerN = list.filter((r) => r.role === "peer").length;
+  const rows = list.map((r) => {
+    const skipped = !!r.error || r.masterPass === null;
+    const dirOk = !skipped && r.actOrder === r.expOrder;
+    const lo = Array.isArray(r.expBand) ? r.expBand[0] : null;
+    const hi = Array.isArray(r.expBand) ? r.expBand[1] : null;
+    const act = r.actPower;
+    const uid = r.uid || r.deviceId || "";
+    const passCell = r.error
+      ? _atPassBadge(false, null, `data-chk-pass="l2" data-uid="${escapeAttr(String(uid))}"`)
+      : (r.masterPass === null
+        ? _atPassBadge(null, "参考", `data-chk-pass="l2" data-uid="${escapeAttr(String(uid))}"`)
+        : _atPassBadge(!!r.masterPass, null, `data-chk-pass="l2" data-uid="${escapeAttr(String(uid))}"`));
+    const dirTxt = r.error
+      ? "—"
+      : (r.masterPass === null
+        ? `<span class="hint">${escapeHtml(r.masterNote || "不硬判")}</span>`
+        : `<span class="${dirOk ? "" : "at-fail-text"}">期望 ${escapeHtml(r.expOrder || "—")} → 实际 ${escapeHtml(r.actOrder || "—")}</span>`);
+    const roleBadge = r.role === "peer"
+      ? `<span class="at-badge at-skip" title="本用例未改这台，但仍按整家庭期望核对 DP98">旁观</span>`
+      : `<span class="at-badge at-pass" title="本用例指定目标机">目标</span>`;
+    return `<tr class="${r.masterPass === false || r.error ? "is-fail" : ""}">` +
+      `<td>` +
+        `<div class="at-dev-name">${escapeHtml(r.device || "—")} ${roleBadge}</div>` +
+        (r.deviceId ? `<div class="at-dev-id mono">${escapeHtml(r.deviceId)}</div>` : "") +
+        `${_atModelChipHtml(r.theory)}` +
+      `</td>` +
+      `<td>${dirTxt}</td>` +
+      `<td class="at-pbar-cell">${_atPowerBandBarHtml(lo, hi, act, skipped, `data-chk-band="1" data-uid="${escapeAttr(String(uid))}"`)}</td>` +
+      `<td>${passCell}</td>` +
+    `</tr>`;
+  }).join("");
+  return `<div class="at-chk-subhead"><span class="at-chk-step">3</span>设备执行` +
+      `<span class="hint">整家庭 ${list.length} 台` +
+        (peerN ? ` · 旁观 ${peerN}` : "") +
+        ` · 硬判 ${okN} 过 / ${failN} 败` +
+        (refN ? ` · 参考 ${refN}` : "") +
+        ` · 点功率区间 /「通过？」弹框</span></div>` +
+    `<table class="at-checker-table at-chk-simple"><thead><tr>` +
+      `<th>设备</th><th>方向</th><th>功率区间 <span class="hint">点看公式</span></th><th>通过？</th>` +
+    `</tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+const _atChkExplainStore = Object.create(null);
+
+let _atChkExplainDlgBound = false;
+
+function _atEnsureChkExplainDlg() {
+  const dlg = document.getElementById("dlgChkExplain");
+  if (!dlg) {
+    return null;
+  }
+  if (!_atChkExplainDlgBound) {
+    _atChkExplainDlgBound = true;
+    document.getElementById("btnChkExplainClose")?.addEventListener("click", () => {
+      if (dlg.open) {
+        dlg.close();
+      }
+    });
+    dlg.addEventListener("click", (ev) => {
+      if (ev.target === dlg) {
+        dlg.close();
+      }
+    });
+  }
+  return dlg;
+}
+
+function _atShowChkExplain(_wrap, title, lines) {
+  const dlg = _atEnsureChkExplainDlg();
+  const titleEl = document.getElementById("chkExplainTitle");
+  const body = document.getElementById("chkExplainBody");
+  if (!dlg || !body) {
+    return;
+  }
+  if (titleEl) {
+    titleEl.textContent = title;
+  }
+  body.innerHTML = _atRenderExplainBody(title, lines);
+  if (typeof dlg.showModal === "function") {
+    if (dlg.open) {
+      dlg.close();
+    }
+    dlg.showModal();
+  } else {
+    dlg.setAttribute("open", "");
+  }
+}
+
+function _atRenderExplainBody(title, lines) {
+  return `<div class="at-chk-explain-title-line">${escapeHtml(title)}</div>` +
+    lines.map((line) => {
+      if (line.kind === "eq") {
+        return `<div class="at-chk-fx-eq">${escapeHtml(line.text)}</div>`;
+      }
+      if (line.kind === "sub") {
+        return `<div class="at-chk-fx-sub"><span class="lab">代入</span>${escapeHtml(line.text)}</div>`;
+      }
+      if (line.kind === "res") {
+        return `<div class="at-chk-fx-res"><span class="lab">结果</span>${escapeHtml(line.text)}</div>`;
+      }
+      return `<div class="at-chk-fx-note">${escapeHtml(line.text)}</div>`;
+    }).join("");
+}
+
+function _atExplainHomeMetric(wrap, metricId) {
+  const ctx = _atChkExplainStore[wrap.getAttribute("data-chk-id")];
+  const defs = ctx?.metrics || [];
+  if (metricId === "all") {
+    const lines = [
+      { kind: "note", text: `家庭量共 ${defs.length} 种。点各卡片可单独看代入；点「充2抑制」看抑制判定。` },
+      ...defs.flatMap((item, i) => [
+        { kind: "eq", text: `${i + 1}. ${item.name}：${item.formula}` },
+        { kind: "sub", text: `${item.subst || "—"} → ${item.value}` },
+        { kind: "note", text: item.note || "" },
+      ]),
+    ];
+    _atShowChkExplain(wrap, `家庭数据 · 共 ${defs.length} 种`, lines);
+    return;
+  }
+  if (metricId === "suppress") {
+    const m = ctx?.expectMeta || {};
+    const c1 = Number(m.chg1Need) || 0;
+    const dis = Number(m.disCap) || 0;
+    const tpv = Number(m.tpv) || 0;
+    const gridConfigured = m.gridBuyLimit != null && m.gridBuyLimit !== "";
+    const gridNum = gridConfigured ? Number(m.gridBuyLimit) : NaN;
+    const lines = [
+      { kind: "note", text: `家庭量共 6 种；充2抑制由其中「充1总 / 可放总 / 三方 / 购电限」算出。` },
+      { kind: "eq", text: "条件2：充1总 > 可放总 + 三方光伏" },
+      { kind: "sub", text: `${c1} > ${dis} + ${tpv} → ${c1} > ${dis + tpv} → ${m.supp2c2 ? "真" : "假"}` },
+      { kind: "eq", text: "条件1：充1总 > 电网购电限 + 三方光伏（购电限未配置则跳过）" },
+      {
+        kind: "sub",
+        text: Number.isFinite(gridNum)
+          ? `${c1} > ${gridNum} + ${tpv} → ${c1} > ${gridNum + tpv} → ${m.supp2c1 ? "真" : "假"}`
+          : "购电限未配置 → 条件1 = 假",
+      },
+      { kind: "eq", text: "充2抑制 = 条件1 || 条件2" },
+      { kind: "res", text: m.chg2Suppressed ? "开 → 充电2/可放/可充可放 压成待机；充电1仍强制充" : "关 → 充电2 允许充" },
+    ];
+    _atShowChkExplain(wrap, "充2抑制怎么算", lines);
+    return;
+  }
+  const item = defs.find((row) => row.id === metricId);
+  if (!item) {
+    return;
+  }
+  const idx = defs.findIndex((row) => row.id === metricId) + 1;
+  _atShowChkExplain(wrap, `${item.name} · 第 ${idx} / ${defs.length} 种家庭量`, [
+    { kind: "eq", text: item.formula },
+    { kind: "sub", text: item.subst || "—" },
+    { kind: "res", text: String(item.value) },
+    { kind: "note", text: item.note || "" },
+  ]);
+}
+
+function _atL2RosterLine(r) {
+  const role = r.role === "peer" ? "旁观" : "目标";
+  if (r.error) {
+    return `${r.device || "—"}[${role}] 下发失败`;
+  }
+  if (r.masterPass === null) {
+    return `${r.device || "—"}[${role}] 参考 · ${r.theory || "—"} · ${r.masterNote || "不硬判"}`;
+  }
+  const mark = r.masterPass ? "通过" : "失败";
+  return `${r.device || "—"}[${role}] ${mark} · 读回 ${r.theory || "—"} · 期望 ${r.expOrder || "—"}${r.expPower == null ? "" : `/${r.expPower}W`} · 实际 ${r.actOrder || "—"}${r.actPower == null ? "" : `/${r.actPower}W`}`;
+}
+
+function _atFindChkResult(list, uid, idx) {
+  if (uid != null && uid !== "") {
+    const hit = (list || []).find((row) => String(row.uid || "") === String(uid) || String(row.deviceId || "") === String(uid));
+    if (hit) {
+      return hit;
+    }
+  }
+  if (idx != null && idx !== "") {
+    return (list || [])[Number(idx)] || null;
+  }
+  return null;
+}
+
+function _atExplainPass(wrap, layer, uid, idx) {
+  const ctx = _atChkExplainStore[wrap.getAttribute("data-chk-id")];
+  const list = ctx?.results || [];
+  const r = _atFindChkResult(list, uid, idx);
+  if (!r) {
+    return;
+  }
+  if (layer === "l1") {
+    const ok = !r.error && !!r.hitTarget;
+    _atShowChkExplain(wrap, `L1 · ${r.device || "设备"}`, [
+      { kind: "note", text: "L1 只看本用例目标机：MCU 读回工况是否等于用例目标。旁观机不进 L1。" },
+      { kind: "eq", text: "通过 ⇔ 读回态 === 目标态" },
+      { kind: "sub", text: `读回「${r.theory || "—"}」 ${ok ? "==" : "!="} 目标「${r.target || "—"}」` },
+      { kind: "res", text: r.error ? `下发失败：${r.error}` : (ok ? "通过" : "失败（工况未中）") },
+      ...(r.l1Formula ? [{ kind: "note", text: r.l1Formula }] : []),
+    ]);
+    return;
+  }
+  const familyLines = [
+    { kind: "eq", text: `全家 L2 对照（共 ${list.length} 台，含旁观）` },
+    ...list.map((row) => ({ kind: "sub", text: _atL2RosterLine(row) })),
+  ];
+  if (r.error) {
+    _atShowChkExplain(wrap, `L2 · ${r.device || "设备"}`, [
+      { kind: "res", text: `下发失败，未检查 L2：${r.error}` },
+      ...familyLines,
+    ]);
+    return;
+  }
+  if (r.masterPass === null) {
+    _atShowChkExplain(wrap, `L2 · ${r.device || "设备"}`, [
+      { kind: "note", text: `${r.role === "peer" ? "旁观机 · " : ""}本态 L2 不硬判（参考）。` },
+      { kind: "eq", text: r.masterNote || r.l2Formula || "determinable=false" },
+      { kind: "res", text: "参考 · 不影响综合失败" },
+      ...familyLines,
+    ]);
+    return;
+  }
+  const lo = Array.isArray(r.expBand) ? r.expBand[0] : "?";
+  const hi = Array.isArray(r.expBand) ? r.expBand[1] : "?";
+  const dirOk = r.actOrder === r.expOrder;
+  const act = r.actPower;
+  const inBand = act != null && Number.isFinite(Number(lo)) && Number.isFinite(Number(hi))
+    && act >= lo && act <= hi;
+  _atShowChkExplain(wrap, `L2 · ${r.device || "设备"}${r.role === "peer" ? " · 旁观" : " · 目标"}`, [
+    { kind: "note", text: "L2 是家庭级：主机按整簇上报态算每台期望，再和该机 DP98 比对。旁观机也要符合。" },
+    { kind: "eq", text: "① 方向：实际 order == 期望 order（来自工况 action）" },
+    { kind: "sub", text: `实际「${r.actOrder || "—"}」 ${dirOk ? "==" : "!="} 期望「${r.expOrder || "—"}」 → ${dirOk ? "过" : "不过"}` },
+    { kind: "eq", text: `② 功率：允许区间下限 ≤ 实际功率 ≤ 上限；期望点位 ${r.expPower ?? "—"}W 只是参考中心` },
+    { kind: "sub", text: `区间 ${lo} ~ ${hi} W；实际 ${act == null ? "—" : act} W → ${inBand ? "落在区间内" : "超出区间"}` },
+    { kind: "res", text: r.masterPass ? "本机 L2 通过" : "本机 L2 失败" },
+    ...(r.l2Formula ? [{ kind: "note", text: r.l2Formula }] : []),
+    ...familyLines,
+  ]);
+}
+
+function _atExplainBand(wrap, uid) {
+  const ctx = _atChkExplainStore[wrap.getAttribute("data-chk-id")];
+  const list = ctx?.results || [];
+  const r = _atFindChkResult(list, uid, null);
+  if (!r) {
+    return;
+  }
+  _atShowChkExplain(wrap, `功率区间 · ${r.device || "设备"}`, _atBandExplainLines(r, ctx?.expectMeta));
+}
+
+function _atExplainL3(wrap, kind) {
+  const ctx = _atChkExplainStore[wrap.getAttribute("data-chk-id")];
+  const l3 = ctx?.l3;
+  if (!l3) {
+    _atShowChkExplain(wrap, "L3 · 家庭异常", [
+      { kind: "note", text: "本帧没有家庭流向数据，无法判定。" },
+    ]);
+    return;
+  }
+  if (kind === "reverse") {
+    const lines = [
+      { kind: "note", text: "逆流 = 家庭并网点向电网送电（馈网）。与报告页「电网馈网」同号：gridW < 0。" },
+      { kind: "eq", text: "通过 ⇔ 无电表跳过，或 gridW ≥ 0（取电/零）" },
+      {
+        kind: "sub",
+        text: l3.gridKnown
+          ? `gridW=${l3.gridW}W → ${l3.reverseFlow ? `馈网 ${l3.reverseW}W → 失败` : "无逆流 → 通过"}`
+          : "未读到电表/LAN → 跳过（不硬判）",
+      },
+      {
+        kind: "res",
+        text: l3.reversePass === null ? "跳过" : (l3.reversePass ? "通过" : "失败"),
+      },
+    ];
+    _atShowChkExplain(wrap, "L3 · 逆流", lines);
+    return;
+  }
+  const lines = [
+    { kind: "note", text: "AC 边充边放 = 同一时刻家庭集群 DP98 既有充电又有放电，空转损耗。" },
+    { kind: "eq", text: `失败 ⇔ 集群充 > ${l3.bothEps}W 且 集群放 > ${l3.bothEps}W` },
+    { kind: "sub", text: `充 ${l3.actChg}W · 放 ${l3.actDchg}W → ${l3.bothWay ? "同时超阈值 → 失败" : "未同时超阈值 → 通过"}` },
+    { kind: "res", text: l3.bothPass ? "通过" : "失败" },
+  ];
+  _atShowChkExplain(wrap, "L3 · AC边充边放", lines);
+}
+
+function _atBindCheckerExplain(root) {
+  if (!root) {
+    return;
+  }
+  root.querySelectorAll(".at-checker-wrap[data-chk-id]").forEach((wrap) => {
+    if (wrap.dataset.fxBound === "1") {
+      return;
+    }
+    wrap.dataset.fxBound = "1";
+    wrap.addEventListener("click", (ev) => {
+      const foldBtn = ev.target.closest("[data-chk-fold]");
+      if (foldBtn && wrap.contains(foldBtn)) {
+        const sec = foldBtn.closest("[data-chk-fold-sec]");
+        if (sec) {
+          const open = sec.classList.toggle("is-collapsed") === false;
+          foldBtn.setAttribute("aria-expanded", open ? "true" : "false");
+        }
+        return;
+      }
+      const homeBtn = ev.target.closest("[data-chk-home]");
+      if (homeBtn && wrap.contains(homeBtn)) {
+        _atExplainHomeMetric(wrap, homeBtn.getAttribute("data-chk-home"));
+        return;
+      }
+      const bandBtn = ev.target.closest("[data-chk-band]");
+      if (bandBtn && wrap.contains(bandBtn)) {
+        _atExplainBand(wrap, bandBtn.getAttribute("data-uid"));
+        return;
+      }
+      const l3Btn = ev.target.closest("[data-chk-l3]");
+      if (l3Btn && wrap.contains(l3Btn)) {
+        _atExplainL3(wrap, l3Btn.getAttribute("data-chk-l3"));
+        return;
+      }
+      const passBtn = ev.target.closest("[data-chk-pass]");
+      if (passBtn && wrap.contains(passBtn)) {
+        _atExplainPass(wrap, passBtn.getAttribute("data-chk-pass"), passBtn.getAttribute("data-uid"), passBtn.getAttribute("data-idx"));
+        return;
+      }
+    });
+  });
+}
+
+function _atCheckerTableHtml(results, expectMeta, homeFlow) {
+  const list = results || [];
   if (!list.length) {
     return "";
   }
-  const failN = list.filter((item) => !item.pass || item.error).length;
-  const rows = list.map((r) => {
-    const failed = !r.pass || !!r.error;
-    const tags = failed ? (r.failTags || _atFailTags(r)) : [];
-    const reason = failed ? _atFailReason(r) : "";
-    const l1Badge = `<span class="at-badge ${r.hitTarget ? "at-pass" : "at-fail"}">${r.hitTarget ? "命中" : "未中"}</span>`;
-    const l2Badge = r.masterPass === null
-      ? `<span class="at-badge at-skip" title="${escapeHtml(r.masterNote || "参考不硬判")}">参考</span>`
-      : `<span class="at-badge ${r.masterPass ? "at-pass" : "at-fail"}">${r.masterPass ? "通过" : "失败"}</span>`;
-    const tagHtml = failed
-      ? (tags.length ? tags.map((tag) => `<span class="at-badge at-fail">${escapeHtml(tag)}</span>`).join("") : `<span class="at-badge at-fail">失败</span>`)
-      : `<span class="at-badge at-pass">通过</span>`;
-    const params = typeof _atParamStr === "function" ? _atParamStr(r.params) : "";
-    return `<tr class="${failed ? "is-fail" : ""}">` +
-      `<td><div class="at-dev-name">${escapeHtml(r.device || "—")}</div>${params ? `<div class="at-dev-params">${escapeHtml(params)}</div>` : ""}</td>` +
-      `<td>${_atModelChipHtml(r.target)}</td>` +
-      `<td>${_atModelChipHtml(r.theory)}</td>` +
-      `<td>${l1Badge}</td>` +
-      `<td class="mono">${escapeHtml(_atFmtCmd(r.expOrder, r.expPower))} → ${escapeHtml(_atFmtCmd(r.actOrder, r.actPower))}</td>` +
-      `<td>${l2Badge}</td>` +
-      `<td class="at-fail-cell">${tagHtml}${reason ? `<div class="at-fail-text">${escapeHtml(reason)}</div>` : `<div class="at-ok-text">—</div>`}</td>` +
-      `</tr>`;
-  }).join("");
-  return `<div class="at-checker-wrap">` +
-    `<div class="at-checker-head">${failN
-      ? `<span class="at-badge at-fail">${failN}/${list.length} 台失败</span>`
-      : `<span class="at-badge at-pass">${list.length} 台通过</span>`}</div>` +
-    `<table class="at-checker-table"><thead><tr><th>设备</th><th>目标</th><th>读回</th><th>从机</th><th>期望 → 实际</th><th>主机</th><th>失败原因</th></tr></thead><tbody>${rows}</tbody></table>` +
-    `</div>`;
+  const l3 = expectMeta?.l3 || (homeFlow ? _atEvalFamilyL3(homeFlow) : null);
+  const stats = _atCheckerStageStats(list, l3);
+  const chkId = `chk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  const metrics = _atHomeMetricDefs(expectMeta);
+  _atChkExplainStore[chkId] = { results: list, expectMeta: expectMeta || null, metrics, l3, homeFlow: homeFlow || null };
+  const verdict = stats.overallFail
+    ? `<div class="at-chk-verdict is-fail">${stats.overallFail} 项未通过` +
+        `${stats.issueFail ? ` · 下发失败 ${stats.issueFail}` : ""}` +
+        `${stats.l1Fail ? ` · L1 未中 ${stats.l1Fail}` : ""}` +
+        `${stats.l2Fail ? ` · L2 失败 ${stats.l2Fail}` : ""}` +
+        `${stats.l3Fail ? ` · L3 家庭异常` : ""}</div>`
+    : `<div class="at-chk-verdict is-ok">设备 ${stats.pass}/${stats.total} 通过` +
+        `${l3 && l3.pass !== false ? " · L3 正常" : ""}</div>`;
+  const l2Body =
+      _atCheckerL2HomeHtml(expectMeta) +
+      `<div class="at-chk-subhead"><span class="at-chk-step">2</span>工况 action</div>` +
+      _atL2ActionSheetHtml(!!expectMeta?.chg2Suppressed) +
+      _atCheckerL2ExecHtml(list);
+  return `<div class="at-checker-wrap at-checker-clean" data-chk-id="${chkId}">` +
+    verdict +
+    _atCheckerL1SectionHtml(list) +
+    _atChkFoldSecHtml(
+      "二",
+      "L2 · 主机决策",
+      "整家庭算期望，每台（含旁观）对 DP98",
+      l2Body,
+      {
+        fail: !!stats.l2Fail,
+        open: !!stats.l2Fail || !!stats.l1Fail,
+        badge: stats.l2Fail
+          ? `<span class="at-badge at-fail">L2 失败</span>`
+          : `<span class="at-badge at-pass">L2 通过</span>`,
+      }
+    ) +
+    _atCheckerL3SectionHtml(l3) +
+  `</div>`;
 }
 
 function _atPlayerCheckerHtml(frame) {
   const results = Array.isArray(frame.checkerState) ? frame.checkerState : [];
   if (results.length) {
-    return _atCheckerTableHtml(results);
+    return _atCheckerTableHtml(results, frame.masterExpect || null, frame.homeFlow || null);
   }
   if (frame.note && !_atIsLegacyWhy(frame.note)) {
     return `<div class="at-player-note">${escapeHtml(frame.note)}</div>`;
@@ -8951,12 +10410,7 @@ function _atPlayerStepHtml(frame) {
       _atDeviceStateTable(frame.familyState);
   }
   if (phase === "observe" || phase === "fail-focus") {
-    const failN = (frame.checkerState || []).filter((item) => !item.pass || item.error).length;
-    const total = (frame.checkerState || []).length;
-    const lead = phase === "fail-focus"
-      ? `<p class="at-step-lead">失败回溯：只看未通过设备的原因。</p>`
-      : `<p class="at-step-lead">${failN ? `检查结果：${failN}/${total} 台失败。` : `检查结果：${total} 台通过。`}</p>`;
-    return lead + _atPlayerCheckerHtml(frame);
+    return _atPlayerCheckerHtml(frame);
   }
   if (phase === "restore") {
     return `<p class="at-step-lead">已把本用例改过的参数恢复到下发前。</p>` +
@@ -9011,9 +10465,12 @@ async function _atReadDevices(home, devices) {
   const list = (devices || []).filter(Boolean);
   await Promise.all(list.map(async (dev) => {
     try {
-      await readDevice(home, dev, { quiet: true });
+      await readDevice(home, dev, { quiet: true, batch: true });
     } catch (_) {}
   }));
+  if (typeof applyDp98ActualForHome === "function") {
+    applyDp98ActualForHome(home);
+  }
 }
 
 async function _atCaptureFrame(home, cycle, phase, extra = {}) {
@@ -9022,13 +10479,20 @@ async function _atCaptureFrame(home, cycle, phase, extra = {}) {
   } else if (extra.readScope === "device") {
     await _atReadDevices(home, _atCycleDevices(home, cycle));
   }
-  _atRefreshLiveHost(home);
-  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const shotAt = extra.at || Date.now();
+  const prevFrozen = atUiFrozen;
+  atUiFrozen = true;
   let snap = { image: "", thumb: "" };
   try {
-    snap = _atSnapshotData(await captureLiveViewCanvas());
-  } catch (err) {
-    extra.note = `${extra.note || ""} 截图失败：${err.message || err}`.trim();
+    _atRefreshLiveHost(home);
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    try {
+      snap = _atSnapshotData(await captureLiveViewCanvas());
+    } catch (err) {
+      extra.note = `${extra.note || ""} 截图失败：${err.message || err}`.trim();
+    }
+  } finally {
+    atUiFrozen = prevFrozen;
   }
   const assignments = _atCycleAssignments(cycle);
   const primary = assignments[0] || cycle;
@@ -9037,8 +10501,8 @@ async function _atCaptureFrame(home, cycle, phase, extra = {}) {
   const actual = targetDevice?.ownerActual || null;
   const frame = {
     id: uid(),
-    at: Date.now(),
-    time: _nowHMS(),
+    at: shotAt,
+    time: extra.time || _nowHMS(shotAt),
     phase,
     title: extra.title || phase,
     note: extra.note || "",
@@ -9059,12 +10523,14 @@ async function _atCaptureFrame(home, cycle, phase, extra = {}) {
       actualOrder: _atStateLabel(actual),
       actualPowerW: actual ? actual.cmdPowerW : null,
     },
-    familyState: _atFamilyState(home),
-    homeFlow: _atHomeFlow(home),
+    familyState: extra.familyState || _atFamilyState(home),
+    homeFlow: extra.homeFlow || _atHomeFlow(home),
     issued: extra.issued || (phase === "issued" ? (cycle.issued || []).map((item) => ({ ...item })) : null),
     checkerState: extra.checkerState || null,
+    masterExpect: extra.masterExpect || null,
     emphasis: extra.emphasis || "",
-    failed: !!cycle.failed,
+    stepOk: extra.stepOk !== undefined ? !!extra.stepOk : true,
+    failed: extra.stepOk === false || !!extra.emphasis,
   };
   cycle.frames.push(frame);
   renderCycleCard(cycle, cycle.failed ? "done fail" : "running");
@@ -9119,19 +10585,20 @@ function renderCycleCard(cycle, phase) {
     : `<div class="hint">（等待下发）</div>`;
   const framesHtml = cycle.frames?.length
     ? `<div class="at-frame-strip">` +
-        cycle.frames.map((frame) =>
-          `<figure class="at-frame ${frame.emphasis === "fail" ? "is-fail" : ""}">
+        cycle.frames.map((frame) => {
+          const stepCls = _atFrameStepClass(frame);
+          return `<figure class="at-frame ${stepCls}">
             <img src="${escapeAttr(frame.thumb || frame.image)}" alt="${escapeAttr(frame.title || frame.phase)}" />
             <figcaption><b>${escapeHtml(frame.time)}</b> ${escapeHtml(_atPhaseLabel(frame.phase))}<div class="at-frame-brief">${escapeHtml(_atFrameOneLiner(frame))}</div></figcaption>
-          </figure>`
-        ).join("") +
+          </figure>`;
+        }).join("") +
       `</div>`
     : "";
   let resultBlock;
   if (cycle.results.length) {
     resultBlock =
       `<div class="at-step"><span class="t">${escapeHtml(cycle.tObserve || "")}</span>结果回收${cycle.failed ? ' <span class="at-badge at-fail">失败</span>' : ""}</div>` +
-      _atCheckerTableHtml(cycle.results) +
+      _atCheckerTableHtml(cycle.results, cycle.masterExpect || null, cycle.homeFlow || null) +
       framesHtml;
   } else if (cycle.step === "runtime" || cycle.step === "checker") {
     resultBlock = `<div class="at-step"><span class="at-badge at-wait">等待观察窗口…</span></div>${framesHtml}`;
@@ -9150,6 +10617,7 @@ function renderCycleCard(cycle, phase) {
       `<div class="at-step"><span class="t">${escapeHtml(cycle.tIssue || "—")}</span>下发到 ${cycle.issued.length || _atCycleAssignments(cycle).length} 台：</div>${issuedRows}` +
       resultBlock +
     `</div>`;
+  _atBindCheckerExplain(card);
   _atUpdateCaseRow(cycle);
 }
 
@@ -9533,6 +11001,12 @@ function _atCycleVerdict(cycle) {
   if (cycle?.status === "paused" || cycle?.status === "running") {
     return { kind: "paused", label: "暂停", text: "未跑完" };
   }
+  if (cycle?.issueFailed) {
+    const text = (cycle.issued || []).filter((item) => item.ok === false).map((item) =>
+      `${item.device || item.deviceId || "—"}${item.err ? `: ${item.err}` : " 下发失败"}`
+    ).join(" · ") || "下发失败";
+    return { kind: "fail", label: "失败", text };
+  }
   if (cycle?.failed || cycle?.status === "fail" || fails.length) {
     const text = fails.map((item) => {
       const tags = (item.failTags || _atFailTags(item)).join("/");
@@ -9718,6 +11192,43 @@ function _atCloseFramePeek() {
   document.getElementById("atFramePeek")?.classList.add("hidden");
 }
 
+/**
+ * @brief Update prev/next controls on the floating frame preview
+ * @return none
+ */
+function _atUpdatePeekNavButtons() {
+  const frames = _atReportFrameSet();
+  const prevBtn = document.getElementById("atFramePeekPrev");
+  const nextBtn = document.getElementById("atFramePeekNext");
+  const hasFrames = frames.length > 1;
+  if (prevBtn) {
+    prevBtn.disabled = !hasFrames || atReportFrameIndex <= 0;
+  }
+  if (nextBtn) {
+    nextBtn.disabled = !hasFrames || atReportFrameIndex >= frames.length - 1;
+  }
+}
+
+/**
+ * @brief Step the report frame index while the peek is open
+ * @param[in] delta -1 for previous, +1 for next
+ * @return none
+ */
+function _atPeekNavFrame(delta) {
+  const frames = _atReportFrameSet();
+  if (!atPeekOpen || !frames.length || !delta) {
+    return;
+  }
+  const next = Math.max(0, Math.min(frames.length - 1, atReportFrameIndex + delta));
+  if (next === atReportFrameIndex) {
+    return;
+  }
+  _atSnapshotPeekBox(document.getElementById("atFramePeek"));
+  atReportFrameIndex = next;
+  const savedId = atLastReport?.id || atActiveReportId || "";
+  _atRenderReportPlayer(savedId);
+}
+
 function _atPeekHostWin() {
   try {
     if (window.top && window.top.document) {
@@ -9725,6 +11236,19 @@ function _atPeekHostWin() {
     }
   } catch (_) {}
   return window;
+}
+
+function _atSnapshotPeekBox(peek) {
+  if (!peek) {
+    return;
+  }
+  const rect = peek.getBoundingClientRect();
+  if (rect.width > 1 && rect.height > 1) {
+    atPeekSize = { w: Math.round(rect.width), h: Math.round(rect.height) };
+  }
+  if (rect.left || rect.top) {
+    atPeekPos = { left: Math.round(rect.left), top: Math.round(rect.top) };
+  }
 }
 
 function _atFitPeekToImage(peek, img) {
@@ -9743,6 +11267,7 @@ function _atFitPeekToImage(peek, img) {
   }
   peek.style.width = `${w}px`;
   peek.style.height = `${h}px`;
+  _atSnapshotPeekBox(peek);
 }
 
 function _atApplyFramePeekBox(peek) {
@@ -9779,11 +11304,37 @@ function _atBindFramePeekDrag() {
     ev.stopPropagation();
     _atCloseFramePeek();
   });
+  peek.querySelector("#atFramePeekPrev")?.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    _atPeekNavFrame(-1);
+  });
+  peek.querySelector("#atFramePeekNext")?.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    _atPeekNavFrame(1);
+  });
+  if (peek.dataset.keyBound !== "1") {
+    peek.dataset.keyBound = "1";
+    document.addEventListener("keydown", (ev) => {
+      if (!atPeekOpen || ev.defaultPrevented) {
+        return;
+      }
+      if (ev.key === "ArrowLeft") {
+        ev.preventDefault();
+        _atPeekNavFrame(-1);
+      } else if (ev.key === "ArrowRight") {
+        ev.preventDefault();
+        _atPeekNavFrame(1);
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        _atCloseFramePeek();
+      }
+    });
+  }
   peek.querySelector("#atFramePeekHead")?.addEventListener("pointerdown", (ev) => {
     if (ev.button != null && ev.button !== 0) {
       return;
     }
-    if (ev.target.closest("#atFramePeekClose")) {
+    if (ev.target.closest("#atFramePeekClose, .at-frame-peek-nav")) {
       return;
     }
     const rect = peek.getBoundingClientRect();
@@ -9824,6 +11375,9 @@ function _atBindFramePeekDrag() {
     _atApplyPeekZoom();
   }, { passive: false });
   view.addEventListener("pointerdown", (ev) => {
+    if (ev.target.closest(".at-frame-peek-nav")) {
+      return;
+    }
     if (ev.button != null && ev.button !== 0 && ev.pointerType === "mouse") {
       return;
     }
@@ -9932,33 +11486,46 @@ function _atBindFramePeekDrag() {
  * @brief Open or update the floating frame preview at top-right
  * @param[in] src image url
  * @param[in] title caption
+ * @param[in] opts keepView preserves window size/zoom when switching frames
  * @return none
  */
-function _atOpenFramePeek(src, title) {
+function _atOpenFramePeek(src, title, opts) {
   const peek = document.getElementById("atFramePeek");
   const img = document.getElementById("atFramePeekImg");
   const cap = document.getElementById("atFramePeekTitle");
   if (!peek || !img || !src) {
     return;
   }
+  const keepView = !!(opts && opts.keepView) && atPeekOpen;
   _atBindFramePeekDrag();
-  _atResetPeekZoom();
-  const applyFit = () => {
-    if (img.naturalWidth) {
-      _atFitPeekToImage(peek, img);
+  if (!keepView) {
+    _atResetPeekZoom();
+  }
+  const applyView = () => {
+    if (!img.naturalWidth) {
+      return;
     }
+    if (keepView) {
+      _atApplyFramePeekBox(peek);
+      _atApplyPeekZoom();
+      return;
+    }
+    _atFitPeekToImage(peek, img);
   };
-  img.onload = applyFit;
-  img.src = src;
+  img.onload = applyView;
+  if (img.src !== src) {
+    img.src = src;
+  }
   if (cap) {
     cap.textContent = title || "过程截图";
   }
   peek.classList.remove("hidden");
   _atApplyFramePeekBox(peek);
   if (img.complete && img.naturalWidth) {
-    applyFit();
+    applyView();
   }
   atPeekOpen = true;
+  _atUpdatePeekNavButtons();
 }
 
 /**
@@ -9975,7 +11542,8 @@ function _atSyncFramePeek(frames) {
   if (!src) {
     return;
   }
-  _atOpenFramePeek(src, `${frame.time || ""} · ${_atPhaseLabel(frame.phase)}`);
+  _atSnapshotPeekBox(document.getElementById("atFramePeek"));
+  _atOpenFramePeek(src, frame.title || `${frame.time || ""} · ${_atPhaseLabel(frame.phase)}`, { keepView: true });
 }
 
 function _atBindReportDetail(rep, savedId, frames) {
@@ -9999,11 +11567,12 @@ function _atBindReportDetail(rep, savedId, frames) {
       const frame = frames[atReportFrameIndex];
       const src = frame?.image || frame?.thumb || "";
       if (src) {
-        _atOpenFramePeek(src, `${frame.time || ""} · ${_atPhaseLabel(frame.phase)}`);
+        _atOpenFramePeek(src, frame.title || `${frame.time || ""} · ${_atPhaseLabel(frame.phase)}`);
       }
       _atRenderReportPlayer(savedId);
     });
   });
+  _atBindCheckerExplain(rep);
 }
 
 function _atRenderReportList(rep, savedId, stats) {
@@ -10051,8 +11620,9 @@ function _atRenderReportDetail(rep, savedId, cycle) {
   const frames = _atReportFrameSet();
   const verdict = _atCycleVerdict(cycle);
   const badge = _atVerdictBadgeHtml(verdict);
+  const deviceIds = _atCycleDeviceIds(cycle);
   const head =
-    `<h3>用例 ${cycle.no} ${badge}</h3>` +
+    `<h3>用例 ${cycle.no} ${badge}${deviceIds ? ` · <span class="mono">${escapeHtml(deviceIds)}</span>` : ""}</h3>` +
     (verdict.text ? `<p class="at-fail-text">${escapeHtml(verdict.text)}</p>` : "") +
     `<div class="at-player-head"><div class="at-player-meta">${_atCycleConstructHtml(cycle)}</div>` +
     `<div class="at-player-controls">` +
@@ -10069,7 +11639,7 @@ function _atRenderReportDetail(rep, savedId, cycle) {
       `<p class="hint">这条用例没有录播截图，下面是当时的检查结果。</p>` +
       _atDeviceStateTable(snap.family) +
       ((cycle.issued || []).length ? _atIssuedTable(cycle.issued) : "") +
-      ((cycle.results || []).length ? _atCheckerTableHtml(cycle.results) : "");
+      ((cycle.results || []).length ? _atCheckerTableHtml(cycle.results, cycle.masterExpect || null, cycle.homeFlow || null) : "");
     _atBindReportDetail(rep, savedId, frames);
     return;
   }
@@ -10079,16 +11649,19 @@ function _atRenderReportDetail(rep, savedId, cycle) {
     `<div class="at-detail-stack">` +
       `<section class="at-detail-level at-detail-frames">` +
         `<div class="at-detail-level-kicker">1 · 中间过程态</div>` +
-        `<p class="hint at-frame-hint">点击帧条放大预览。双指捏合/滑动看图，拖标题栏移动窗口，左下角拖拽缩放窗口。</p>` +
+        `<p class="hint at-frame-hint">点击帧条放大预览；预览窗口左右按钮或 ← → 切换帧。双指捏合/滑动看图，拖标题栏移动窗口，左下角拖拽缩放窗口。</p>` +
         `<div class="at-player-strip">` +
-          frames.map((item, idx) => `<button type="button" class="at-player-thumb ${idx === atReportFrameIndex ? "active" : ""} ${item.failed || item.emphasis === "fail" ? "is-fail" : ""}" data-frame-idx="${idx}" title="点击放大预览">` +
+          frames.map((item, idx) => {
+            const stepCls = _atFrameStepClass(item);
+            return `<button type="button" class="at-player-thumb ${idx === atReportFrameIndex ? "active" : ""} ${stepCls}" data-frame-idx="${idx}" title="点击放大预览">` +
             (item.thumb || item.image ? `<img src="${escapeAttr(item.thumb || item.image)}" alt="${escapeAttr(item.title || item.phase)}" />` : `<span class="at-thumb-ph">${escapeHtml(_atPhaseLabel(item.phase))}</span>`) +
-            `<span>${escapeHtml(item.time || "")} · ${escapeHtml(_atPhaseLabel(item.phase))}</span></button>`).join("") +
+            `<span>${escapeHtml(item.time || "")} · ${escapeHtml(_atPhaseLabel(item.phase))}</span></button>`;
+          }).join("") +
         `</div>` +
       `</section>` +
-      `<section class="at-detail-level at-detail-note ${frame.failed || frame.emphasis === "fail" ? "is-fail" : ""}">` +
+      `<section class="at-detail-level at-detail-note ${_atFrameStepClass(frame)}">` +
         `<div class="at-detail-level-kicker">2 · 说明</div>` +
-        `<div class="at-player-info"><div class="at-player-title">${escapeHtml(frame.title || _atPhaseLabel(frame.phase))} · ${escapeHtml(frame.time || "")}${frame.failed || frame.emphasis === "fail" ? ' <span class="at-badge at-fail">失败</span>' : ""}</div>` +
+        `<div class="at-player-info"><div class="at-player-title">${escapeHtml(frame.title || _atPhaseLabel(frame.phase))} · ${escapeHtml(frame.time || "")}${frame.stepOk === false || frame.emphasis === "fail" ? ' <span class="at-badge at-fail">失败</span>' : ' <span class="at-badge at-pass">通过</span>'}</div>` +
         _atPlayerStepHtml(frame) +
         `</div>` +
       `</section>` +
@@ -10117,7 +11690,10 @@ function _atRenderReportPlayer(savedId) {
   _atRenderReportList(rep, savedId, stats);
 }
 
-function _atEvaluateAssignmentResult(home, assignment, expect, issuedItem) {
+function _atEvaluateAssignmentResult(home, assignment, expect, issuedItem, opts) {
+  opts = opts || {};
+  const role = opts.role || "target";
+  const isPeer = role === "peer";
   const dev = (home?.devices || []).find((item) => item.uid === assignment.uid);
   if (!dev) {
     return null;
@@ -10128,9 +11704,9 @@ function _atEvaluateAssignmentResult(home, assignment, expect, issuedItem) {
   const actLabel = act ? act.label : "—";
   const actOrder = _atStateLabel(act);
   const actPower = act ? act.cmdPowerW : null;
-  const target = assignment.target;
-  const hitTarget = theory !== "—" && theory === target;
-  const ex = expect.byUid[dev.uid];
+  const target = isPeer ? "" : (assignment.target || "");
+  const hitTarget = isPeer ? true : (theory !== "—" && theory === target);
+  const ex = expect?.byUid?.[dev.uid];
   let masterPass = null;
   let masterNote = "";
   let expOrder = "—";
@@ -10157,12 +11733,45 @@ function _atEvaluateAssignmentResult(home, assignment, expect, issuedItem) {
       " · " +
       ex.why;
   }
+  const ownerHit = owner?.reason ? `MCU首次命中「${owner.reason}」→ ${theory}` : `MCU首次命中 → ${theory}`;
+  const l1Formula = isPeer
+    ? `旁观机：本用例未指定目标，L1 不判。读回「${theory}」。`
+    : `${ownerHit}；hitTarget = (读回态 === 目标态) = (${theory} ${hitTarget ? "==" : "!="} ${target})`;
+  const issueErr = issuedItem?.err || null;
+  let l2Formula = "";
+  if (issueErr) {
+    l2Formula = "下发失败，未检查 L2";
+  } else if (!ex) {
+    l2Formula = "无期望模型";
+  } else if (!ex.determinable) {
+    l2Formula = `determinable=false，不硬判。${ex.why || ""}`.trim();
+  } else {
+    const lo = Array.isArray(ex.band) ? ex.band[0] : "?";
+    const hi = Array.isArray(ex.band) ? ex.band[1] : "?";
+    const dirOk = actOrder === ex.order;
+    const powOk = actPower != null && Number.isFinite(Number(lo)) && Number.isFinite(Number(hi))
+      && actPower >= lo && actPower <= hi;
+    const cat = ex.rep?.cat || "";
+    const chg2Note = cat === "chg1"
+      ? "本机=充电1，充2抑制管不到，期望始终为充。"
+      : (cat === "chg2"
+        ? (ex.order === "待机" ? "本机=充电2且已被抑制，期望待机。" : "本机=充电2且未抑制，期望充。")
+        : (ex.why || ""));
+    l2Formula =
+      `${isPeer ? "旁观机仍按整家庭期望核对。" : ""}${chg2Note}` +
+      ` ①方向：实际「${actOrder}」${dirOk ? "=" : "≠"}期望「${ex.order}」→${dirOk ? "过" : "不过"}；` +
+      ` ②功率：允许区间 ${lo}~${hi}W，实际 ${actPower == null ? "—" : actPower}W →${powOk ? "落在区间内" : "超出区间"}；` +
+      ` L2=${!!masterPass ? "通过" : "失败"}。` +
+      `（期望点位 ${ex.powerW}W 只是中心参考，判定看区间不看单点）`;
+  }
   const result = {
-    device: assignment.device,
-    deviceId: assignment.deviceId,
-    params: assignment.params,
-    target,
-    coverageKey: assignment.coverageKey,
+    uid: assignment.uid || dev.uid,
+    device: assignment.device || dev.name || dev.deviceId,
+    deviceId: assignment.deviceId || dev.deviceId,
+    role,
+    params: assignment.params || {},
+    target: target || "—",
+    coverageKey: assignment.coverageKey || "",
     theory,
     actLabel,
     actOrder,
@@ -10171,21 +11780,63 @@ function _atEvaluateAssignmentResult(home, assignment, expect, issuedItem) {
     expOrder,
     expPower,
     expBand,
+    bandCat: ex?.rep?.cat || (typeof _atCat === "function" ? _atCat(theory) : "") || "",
+    chgCapW: ex?.rep?.chg ?? owner?.chgCapW ?? null,
+    dchgCapW: ex?.rep?.dchg ?? owner?.dchgCapW ?? null,
+    bandFormula: "",
     masterPass,
     masterNote,
-    pass: hitTarget && masterPass !== false,
-    error: issuedItem?.err || null,
+    l1Formula,
+    l2Formula,
+    pass: isPeer ? (!issueErr && masterPass !== false) : (hitTarget && masterPass !== false),
+    error: issueErr,
   };
+  result.bandFormula = _atBandExplainLines(result, {
+    chg2Suppressed: !!expect?.chg2Suppressed,
+  }).filter((line) => line.kind === "eq").map((line) => line.text).join("；");
+  result.failStage = _atResultFailStage(result);
   result.failTags = _atFailTags(result);
   result.failReason = _atFailReason({ ...result, failReason: "" });
   return result;
 }
 
+/**
+ * @brief Evaluate whole-home L2; L1 only for devices this case targeted
+ */
 function _atEvaluateComboResult(home, cycle, expect) {
   const issuedMap = new Map((cycle.issued || []).map((item) => [item.uid, item]));
-  return _atCycleAssignments(cycle)
-    .map((assignment) => _atEvaluateAssignmentResult(home, assignment, expect, issuedMap.get(assignment.uid)))
-    .filter(Boolean);
+  const assignMap = new Map(_atCycleAssignments(cycle).map((item) => [item.uid, item]));
+  const rows = [];
+  const seen = new Set();
+  for (const dev of home?.devices || []) {
+    if (!dev?.uid) {
+      continue;
+    }
+    seen.add(dev.uid);
+    const assignment = assignMap.get(dev.uid) || {
+      uid: dev.uid,
+      deviceId: dev.deviceId,
+      device: dev.name || dev.deviceId,
+      target: "",
+      coverageKey: "",
+      params: {},
+    };
+    const role = assignMap.has(dev.uid) ? "target" : "peer";
+    const row = _atEvaluateAssignmentResult(home, assignment, expect, issuedMap.get(dev.uid), { role });
+    if (row) {
+      rows.push(row);
+    }
+  }
+  for (const assignment of assignMap.values()) {
+    if (seen.has(assignment.uid)) {
+      continue;
+    }
+    const row = _atEvaluateAssignmentResult(home, assignment, expect, issuedMap.get(assignment.uid), { role: "target" });
+    if (row) {
+      rows.push(row);
+    }
+  }
+  return rows;
 }
 
 async function runAutoTest() {
@@ -10195,9 +11846,19 @@ async function runAutoTest() {
     toast("请先选择家庭", "error");
     return;
   }
+  try {
+    await refreshDeviceOnlineFlags(home);
+  } catch (_) {}
+  renderAutoRun();
   const selectedUids = _atEnsureSelected(home);
   if (!selectedUids.length) {
-    toast("请至少选择一台设备", "error");
+    const offlineN = (home.devices || []).filter((dev) => !deviceIsOnline(dev)).length;
+    toast(
+      offlineN
+        ? `没有可执行设备：当前有 ${offlineN} 台离线，请先选在线设备`
+        : "请至少选择一台设备",
+      "error"
+    );
     return;
   }
   const execPlan = buildAutoExecutionPlan(home, selectedUids, atSelectedTargets);
@@ -10207,15 +11868,21 @@ async function runAutoTest() {
     toast("没有可执行的组合用例，请勾选设备、工况徽章，并在列表里勾选要跑的用例", "error");
     return;
   }
-  const settle = Math.max(4, Number(document.getElementById("atSettle").value || 15));
+  const settle = Math.max(10, Number(document.getElementById("atSettle").value || 30));
   const restore = document.getElementById("atRestore").checked;
   const totalCycleN = Number.isFinite(execPlan.totalCycles) ? execPlan.totalCycles : execPlan.cycles.length;
   const truncTxt = execPlan.truncated ? `；总组合 ${totalCycleN} 条，当前仅加载前 ${execPlan.cycles.length} 条` : "";
-  if (!confirm(`将执行 ${picked.length}/${execPlan.cycles.length} 条组合用例（${selectedUids.length} 台设备${truncTxt}）；每条用例按检查→快照→下发→运行拍照→checker→回收执行，并真实改设备参数。确认开始？`)) {
+  const ok = await appConfirm(
+    `将执行 ${picked.length}/${execPlan.cycles.length} 条组合用例（${selectedUids.length} 台设备${truncTxt}）；每条用例按检查→快照→下发→运行拍照→checker→回收执行，并真实改设备参数。确认开始？`,
+    { title: "开始自动化" }
+  );
+  if (!ok) {
     return;
   }
   atRunning = true;
   atPauseRequested = false;
+  atUiFrozen = false;
+  stopAutoRefreshTimer();
   atActiveReportId = null;
   atShowResults = true;
   atLastReport = null;
@@ -10270,15 +11937,18 @@ async function runAutoTest() {
       cycle.step = "before";
       cycle.tIssue = _nowHMS();
       await _atCaptureFrame(home, cycle, "before", {
-        title: "1. 开始前 · 家庭流向与设备状态",
+        title: _atFrameTitleWithDevice("1. 开始前 · 家庭流向与设备状态", cycle),
         readScope: "family",
+        stepOk: true,
         note: "下发前家庭各端口流向，以及各设备当前工况。",
       });
 
       cycle.step = "issue";
       await Promise.all(_atCycleAssignments(cycle).map(async (assignment) => {
         const dev = (home.devices || []).find((item) => item.uid === assignment.uid);
-        if (!dev) return;
+        if (!dev) {
+          return;
+        }
         for (const [k, v] of Object.entries(assignment.params || {})) {
           dev.drafts[k] = String(v);
         }
@@ -10287,7 +11957,9 @@ async function runAutoTest() {
         if (Object.keys(assignment.params || {}).length) {
           try {
             ok = await issueDevice(home, dev, { batch: true });
-            if (!ok) err = dev.error || "下发失败";
+            if (!ok) {
+              err = dev.error || "下发失败";
+            }
           } catch (e) {
             ok = false;
             err = String(e.message || e);
@@ -10306,23 +11978,48 @@ async function runAutoTest() {
           err,
         });
       }));
+      const issueFailed = _atIssueFailed(cycle);
       renderCycleCard(cycle, "running");
       await _atCaptureFrame(home, cycle, "issued", {
-        title: "2. 下发参数",
+        title: _atFrameTitleWithDevice("2. 下发参数", cycle),
         readScope: "family",
+        stepOk: !issueFailed,
         issued: cycle.issued.map((item) => ({ ...item })),
-        note: cycle.issued.some((item) => Object.keys(item.params || {}).length)
-          ? "已按下表参数下发到各设备。"
-          : "各设备已是目标工况，无需改参。",
+        note: issueFailed
+          ? "下发失败，跳过后续运行/检查，直接进入回收。"
+          : (cycle.issued.some((item) => Object.keys(item.params || {}).length)
+            ? "已按下表参数下发到各设备。"
+            : "各设备已是目标工况，无需改参。"),
       });
+
+      if (issueFailed) {
+        cycle.issueFailed = true;
+        cycle.failed = true;
+        cycle.results = _atResultsFromIssueFail(cycle);
+        cycle.tObserve = _nowHMS();
+        cycle.step = "collect";
+        if (restore) {
+          await _atRunCycleRestore(home, cycle, orig, fieldsToRestore);
+        }
+        cycle.step = "done";
+        cycle.status = "fail";
+        renderCycleCard(cycle, "done fail");
+        _atSetProg(idx + 1, picked.length, `用例 ${cycle.no}（${idx + 1}/${picked.length}）下发失败`);
+        if (atPauseRequested) {
+          paused = true;
+          break;
+        }
+        continue;
+      }
 
       cycle.step = "runtime";
       const midDelayMs = Math.max(1000, Math.floor((settle * 1000) / 2));
       _atSetProg(idx, picked.length, `用例 ${cycle.no}（${idx + 1}/${picked.length}）· 等待运行时态`);
       await _atSleep(midDelayMs);
       await _atCaptureFrame(home, cycle, "mid", {
-        title: "3. 运行中 · 家庭流向",
+        title: _atFrameTitleWithDevice("3. 运行中 · 家庭流向", cycle),
         readScope: "family",
+        stepOk: true,
         note: atPauseRequested ? "已收到暂停，提前进入检查。" : "观察窗口中点的家庭流向和设备状态。",
       });
       if (!atPauseRequested) {
@@ -10330,55 +12027,54 @@ async function runAutoTest() {
       }
 
       cycle.step = "checker";
-      cycle.tObserve = _nowHMS();
       await _atReadDevices(home, home.devices || []);
       const expect = computeMasterExpect(home, _atMasterOpts());
+      const homeFlow = _atHomeFlow(home);
+      const familyL3 = _atEvalFamilyL3(homeFlow);
       cycle.chg2Suppressed = expect.chg2Suppressed;
+      cycle.homeFlow = homeFlow;
+      cycle.familyL3 = familyL3;
+      cycle.masterExpect = { ..._atExpectMetaBrief(expect, home), l3: familyL3 };
       cycle.results = _atEvaluateComboResult(home, cycle, expect);
-      cycle.failed = cycle.results.some((item) => !item.pass || !!item.error);
+      cycle.failed = cycle.results.some((item) => !item.pass || !!item.error) || familyL3.pass === false;
+      const tCheck = Date.now();
+      cycle.tObserve = _nowHMS(tCheck);
+      const checkSnap = {
+        at: tCheck,
+        time: cycle.tObserve,
+        familyState: _atFamilyState(home),
+        homeFlow,
+      };
       await _atCaptureFrame(home, cycle, "observe", {
-        title: cycle.failed ? "4. 检查结果 · 失败" : "4. 检查结果 · 通过",
+        title: _atFrameTitleWithDevice(cycle.failed ? "4. 检查结果 · 失败" : "4. 检查结果 · 通过", cycle),
+        stepOk: !cycle.failed,
         note: cycle.failed
-          ? `${_atFailLines(cycle.results).length}/${cycle.results.length} 台失败`
-          : `${cycle.results.length} 台通过`,
+          ? `${_atFailLines(cycle.results).length}/${cycle.results.length} 台设备失败` +
+            (familyL3.pass === false
+              ? ` · L3${familyL3.reverseFlow ? "逆流" : ""}${familyL3.bothWay ? (familyL3.reverseFlow ? "+边充边放" : "边充边放") : ""}`
+              : "")
+          : `${cycle.results.length} 台通过 · L3 正常`,
         checkerState: cycle.results,
+        masterExpect: cycle.masterExpect,
         emphasis: cycle.failed ? "fail" : "",
+        ...checkSnap,
       });
       if (cycle.failed) {
         await _atCaptureFrame(home, cycle, "fail-focus", {
-          title: "失败回溯",
-          note: `${_atFailLines(cycle.results).length}/${cycle.results.length} 台失败`,
+          title: _atFrameTitleWithDevice("失败回溯", cycle),
+          stepOk: false,
+          note: `${_atFailLines(cycle.results).length}/${cycle.results.length} 台失败` +
+            (familyL3.pass === false ? " · L3 家庭异常" : ""),
           checkerState: cycle.results,
+          masterExpect: cycle.masterExpect,
           emphasis: "fail",
+          ...checkSnap,
         });
       }
 
       cycle.step = "collect";
       if (restore) {
-        for (const assignment of _atCycleAssignments(cycle)) {
-          const dev = (home.devices || []).find((item) => item.uid === assignment.uid);
-          if (!dev || !Object.keys(assignment.params || {}).length) {
-            continue;
-          }
-          for (const key of fieldsToRestore) {
-            dev.drafts[key] = orig[assignment.uid]?.[key] || "";
-          }
-          try {
-            await issueDevice(home, dev, { batch: true });
-          } catch (_) {}
-        }
-        await _atCaptureFrame(home, cycle, "restore", {
-          title: "5. 结果回收",
-          readScope: "family",
-          issued: _atCycleAssignments(cycle).map((assignment) => ({
-            device: assignment.device,
-            target: assignment.target,
-            params: orig[assignment.uid] || {},
-            from: { ...(assignment.params || {}) },
-            ok: true,
-          })),
-          note: "已恢复本用例涉及设备的原始参数。",
-        });
+        await _atRunCycleRestore(home, cycle, orig, fieldsToRestore);
       }
 
       cycle.step = "done";
@@ -10393,6 +12089,8 @@ async function runAutoTest() {
   } finally {
     atRunning = false;
     atPauseRequested = false;
+    atUiFrozen = false;
+    syncAutoRefreshTimer();
     _atSetRunButtons();
   }
   await finishAutoTest(home, cycles, settle, {
