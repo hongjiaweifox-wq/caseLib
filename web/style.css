@@ -222,6 +222,51 @@ body.capturing-live #tabLive.hidden {
   background: #f8fafc;
 }
 
+/* 家庭监控：只显示检查结果区（与报告同一套 at-checker） */
+body.shell-monitor .layout {
+  grid-template-columns: 1fr;
+}
+body.shell-monitor .sidebar,
+body.shell-monitor .sidebar-toggle,
+body.shell-monitor .topright-actions {
+  display: none !important;
+}
+body.shell-monitor .main {
+  grid-column: 1;
+  padding: 0;
+  overflow: auto;
+}
+body.shell-monitor #emptyState,
+body.shell-monitor #homeView,
+body.shell-monitor #loginMgrView {
+  display: none !important;
+}
+body.shell-monitor #familyMonitorView {
+  display: flex !important;
+  flex-direction: column;
+  min-height: 100%;
+  padding: 12px 14px 24px;
+  box-sizing: border-box;
+  background: var(--bg, #f8fafc);
+}
+.family-monitor-meta {
+  font-size: 12px;
+  color: var(--muted, #64748b);
+  margin: 0 0 10px;
+}
+.family-monitor-body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.family-monitor-empty {
+  border: 1px dashed #cbd5e1;
+  border-radius: 12px;
+  padding: 28px 16px;
+  text-align: center;
+  color: #64748b;
+  background: #fff;
+}
+
 /* Main */
 .main {
   grid-column: 2;

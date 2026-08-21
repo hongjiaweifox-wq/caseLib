@@ -627,10 +627,7 @@ async function fetchDeviceDetail(home, deviceId, _retried = false) {
   const region = (ENV_CONFIG[home.envHost] || {}).region || "cn";
   const bnHost = `backendng-${region}.tuya-inc.com`;
   const cookie = resolveCookie(home.envHost);
-  const res = await fetch(`/api/proxy/device-detail?deviceId=${encodeURIComponent(deviceId)}`, {
-    headers: { "X-Target-Host": bnHost, "X-Cookie": cookie },
-  });
-  const text = await res.text();
+  const { text } = await CaseApi.getDeviceDetail(bnHost, cookie, deviceId);
   let json;
   try {
     json = JSON.parse(text);
@@ -707,7 +704,7 @@ let regQueryMode = "property"; // property | bizlog
  * Step1: protocol/query → energyModelType / protocolCode / protocolPlan
  */
 async function fetchDeviceProtocolInfo(home, device) {
-  const res = await apiGet("/api/proxy/protocol-query", home, { deviceId: device.deviceId });
+  const res = await CaseApi.queryProtocol(home, { deviceId: device.deviceId });
   const data = unwrapResult(res);
   const row = Array.isArray(data) ? data[0] : data;
   if (!row || typeof row !== "object") {
@@ -728,7 +725,7 @@ async function fetchDeviceProtocolInfo(home, device) {
  * Step2: protocol-model page by register → code
  */
 async function lookupCodeByRegister(home, protocol, regHex) {
-  const res = await apiGet("/api/proxy/protocol-model-page", home, {
+  const res = await CaseApi.queryProtocolModelPage(home, {
     energyModelType: protocol.energyModelType,
     protocolCode: protocol.protocolCode,
     sortType: "",
@@ -760,7 +757,7 @@ async function lookupCodeByRegister(home, protocol, regHex) {
  * Step3: property/query by code → value
  */
 async function fetchPropertyByCode(home, device, code) {
-  const res = await apiGet("/api/proxy/property-query", home, {
+  const res = await CaseApi.queryProperties(home, {
     page: "1",
     deviceId: device.deviceId,
     code,
@@ -888,8 +885,7 @@ async function loadRegQueryRawDps() {
   }
   sel.innerHTML = `<option value="">加载 raw DP…</option>`;
   try {
-    const res = await fetch(`/api/beidou/dp-ability?pid=${encodeURIComponent(pid)}`);
-    const json = await res.json();
+    const json = await CaseApi.getBeidouDpAbility(pid);
     if (!json?.ok) throw new Error(json?.error || "拉取 DP 列表失败");
     const dps = Array.isArray(json.dps) ? json.dps : [];
     if (regQueryCtx) {
@@ -1221,7 +1217,7 @@ async function searchBizlogRegister(home, deviceId, { reg, dpIds }) {
       eventIdAll: "0",
     };
     if (pageStartRow) body.pageStartRow = pageStartRow;
-    const res = await apiPost("/api/proxy/bizlog-search", host, body);
+    const res = await CaseApi.searchBizlog(host, body);
     const upstream = res.data || {};
     if (upstream.code !== undefined && upstream.code !== 0) {
       throw new Error(upstream.msg || upstream.message || `hestia code ${upstream.code}`);
@@ -1472,8 +1468,7 @@ let knowledgeModels = [];
  */
 async function loadKnowledgeModels() {
   try {
-    const res = await fetch("/api/models");
-    const json = await res.json();
+    const json = await CaseApi.listModels();
     knowledgeModels = Array.isArray(json.models) ? json.models : [];
   } catch (_) {
     knowledgeModels = [];
@@ -2196,7 +2191,7 @@ async function issueHighFrequencyOnce(opts = {}) {
   if (highFreqBusy) return false;
   highFreqBusy = true;
   try {
-    const res = await apiGet("/api/proxy/high-frequency", home, { groupId });
+    const res = await CaseApi.queryHighFrequency(home, { groupId });
     const raw = unwrapResult(res);
     const list = Array.isArray(raw?.issueDeviceList)
       ? raw.issueDeviceList
@@ -2236,7 +2231,7 @@ async function issueHighFrequencyOnce(opts = {}) {
 
     async function schemaFor(devId) {
       if (schemaByDev.has(devId)) return schemaByDev.get(devId);
-      const schemaRes = await apiGet("/api/proxy/pid-schema", home, { devId });
+      const schemaRes = await CaseApi.queryPidSchema(home, { devId });
       const map = indexSchema(unwrapResult(schemaRes));
       schemaByDev.set(devId, map);
       return map;
@@ -2254,7 +2249,7 @@ async function issueHighFrequencyOnce(opts = {}) {
             throw new Error(`找不到 dpCode=${t.dpCode} 的 dpId`);
           }
           const dpValue = coerceHighFreqIssueValue(t.value, entry.dpSchema);
-          const issueRes = await apiPost("/api/proxy/issue", home, {
+          const issueRes = await CaseApi.issueDevice(home, {
             devId: t.devId,
             timestamp: null,
             propertyList: [{ dpId: String(entry.dpId), dpValue }],
@@ -2430,12 +2425,7 @@ function persist(immediate = false) {
 
   const flush = async () => {
     try {
-      const res = await fetch("/api/store", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ store: dump }),
-      });
-      const json = await res.json();
+      const { json } = await CaseApi.saveStore(dump);
       if (!json.ok) throw new Error(json.error || "保存失败");
       if (json.path) storePath = json.path;
     } catch (err) {
@@ -2453,8 +2443,7 @@ function persist(immediate = false) {
 }
 
 async function loadStoreFromServer() {
-  const res = await fetch("/api/store");
-  const json = await res.json();
+  const json = await CaseApi.loadStore();
   if (!json.ok) throw new Error(json.error || "读取失败");
   storePath = json.path || "";
   const store = json.store || emptyState();
@@ -2835,6 +2824,23 @@ async function apiPost(path, homeOrHost, body, _retried = false) {
   }
 }
 
+if (typeof CaseApi !== "undefined" && CaseApi.bindTransport) {
+  CaseApi.bindTransport({
+    get: apiGet,
+    post: apiPost,
+    fetchJson: async (url, init) => {
+      const res = await fetch(url, init || {});
+      const json = await res.json().catch(() => ({}));
+      return { res, json };
+    },
+    fetchText: async (url, init) => {
+      const res = await fetch(url, init || {});
+      const text = await res.text();
+      return { res, text };
+    },
+  });
+}
+
 /** 家庭设备列表：backendng-<region>.tuya-inc.com /inner/backendng/device/homeDevice */
 async function fetchHomeDevices(home) {
   const region = (ENV_CONFIG[home.envHost] || {}).region || "cn";
@@ -2844,12 +2850,11 @@ async function fetchHomeDevices(home) {
   let offset = 0;
   const limit = 50;
   for (let guard = 0; guard < 40; guard++) {
-    const res = await fetch("/api/proxy/home-device", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Target-Host": bnHost, "X-Cookie": cookie },
-      body: JSON.stringify({ homeId: home.homeId, offset, limit }),
+    const json = await CaseApi.postHomeDevicePage(bnHost, cookie, {
+      homeId: home.homeId,
+      offset,
+      limit,
     });
-    const json = await res.json();
     assertProxyPayload(json);
     const data = json.data || {};
     const datas = data.datas || data.result?.datas || [];
@@ -3123,7 +3128,7 @@ async function readDevice(home, device, opts = {}) {
   try {
     // Refresh only needs shadow + SOC. pid-schema only when本地尚无 schema。
     if (!Object.keys(device.schema || {}).length || !device.pid) {
-      const schemaRes = await apiGet("/api/proxy/pid-schema", home, { devId: device.deviceId });
+      const schemaRes = await CaseApi.queryPidSchema(home, { devId: device.deviceId });
       const schemaRaw = unwrapResult(schemaRes);
       const pidFromSchema =
         schemaRaw?.pid ||
@@ -3157,7 +3162,7 @@ async function readDevice(home, device, opts = {}) {
     let latest = device.reportTime || null;
 
     if (propertyList.length) {
-      const shadowRes = await apiPost("/api/proxy/shadow-property", home, {
+      const shadowRes = await CaseApi.queryShadowProperty(home, {
         devId: device.deviceId,
         propertyList,
       });
@@ -3298,7 +3303,7 @@ async function fetchSocSeries(home, device, hours = 24) {
   const code = "heap_soc";
   device.socMeta = { code, start, end, hours, loading: true };
   try {
-    const res = await apiGet("/api/proxy/query-neko", home, {
+    const res = await CaseApi.queryNeko(home, {
       energyDeviceId: device.deviceId,
       code,
       startTime: String(start),
@@ -3834,7 +3839,7 @@ function resolveGridNodePower(home) {
 async function readMeterShadowLive(home, meter) {
   /** Real-time power via ops query-shadow-property. */
   const spec = meterDpSpec(meter);
-  const shadowRes = await apiPost("/api/proxy/shadow-property", home, {
+  const shadowRes = await CaseApi.queryShadowProperty(home, {
     devId: meter.deviceId,
     propertyList: [{ dpId: String(spec.dpId), dpCode: spec.dpCode }],
   });
@@ -3862,7 +3867,7 @@ async function readMeterBizlogHistory(home, meter) {
   /** Historical curve via Hestia bizlog/search (charts tab). */
   const spec = meterDpSpec(meter);
   meter.hestiaHost = hestiaHostForHome(home);
-  const res = await apiPost("/api/proxy/bizlog-search", meter.hestiaHost, {
+  const res = await CaseApi.searchBizlog(meter.hestiaHost, {
     eventIds: BIZLOG_EVENT_IDS,
     devId: meter.deviceId,
     limit: 50,
@@ -3979,7 +3984,7 @@ async function issueDevice(home, device, opts = {}) {
   device.loading = true;
   if (!batch) render();
   try {
-    const res = await apiPost("/api/proxy/issue", home, {
+    const res = await CaseApi.issueDevice(home, {
       devId: device.deviceId,
       timestamp: null,
       propertyList,
@@ -4028,7 +4033,7 @@ async function issueDevice(home, device, opts = {}) {
 async function fetchDeviceHomeModelParams(home, device) {
   if (!device) return null;
   try {
-    const res = await apiGet("/api/proxy/property-query", home, {
+    const res = await CaseApi.queryProperties(home, {
       page: "1",
       deviceId: device.deviceId,
     });
@@ -4168,7 +4173,7 @@ async function issueFamilyToDevices(home) {
     devices.map(async (device) => {
       if (Object.keys(device.schema || {}).length) return;
       try {
-        const schemaRes = await apiGet("/api/proxy/pid-schema", home, { devId: device.deviceId });
+        const schemaRes = await CaseApi.queryPidSchema(home, { devId: device.deviceId });
         device.schema = indexSchema(unwrapResult(schemaRes));
       } catch (_) {}
     })
@@ -4179,7 +4184,7 @@ async function issueFamilyToDevices(home) {
       const propertyList = buildFamilyIssueList(home, device);
       if (!propertyList.length) return null;
       try {
-        const res = await apiPost("/api/proxy/issue", home, {
+        const res = await CaseApi.issueDevice(home, {
           devId: device.deviceId,
           timestamp: null,
           propertyList,
@@ -4334,7 +4339,7 @@ async function fetchDeviceClusterRole(home, device) {
     reportTime: null,
   };
   try {
-    const res = await apiGet("/api/proxy/property-query", home, {
+    const res = await CaseApi.queryProperties(home, {
       page: "1",
       deviceId: device.deviceId,
       code: ELECTION_ROLE_CODE,
@@ -4499,8 +4504,7 @@ async function loadElectionSettings(home) {
   const homeId = electionHomeKey(home);
   if (!homeId) return;
   try {
-    const res = await fetch(`/api/election/settings?homeId=${encodeURIComponent(homeId)}`);
-    const data = await res.json();
+    const data = await CaseApi.getElectionSettings(homeId);
     if (data?.ok && data.intervalSec) {
       electionIntervalSec = Math.max(1, Math.min(3600, Number(data.intervalSec) || ELECTION_DEFAULT_INTERVAL_SEC));
     }
@@ -4516,11 +4520,7 @@ async function saveElectionInterval(home, sec) {
   electionIntervalSec = n;
   syncElectionPollUi();
   try {
-    await fetch("/api/election/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ homeId, intervalSec: n }),
-    });
+    await CaseApi.saveElectionSettings({ homeId, intervalSec: n });
   } catch (err) {
     console.warn("saveElectionInterval", err);
   }
@@ -4533,8 +4533,7 @@ async function ensureElectionTimelineLoaded(home) {
   const homeId = electionHomeKey(home);
   if (!homeId) return;
   try {
-    const res = await fetch(`/api/election/rows?homeId=${encodeURIComponent(homeId)}&limit=2000`);
-    const data = await res.json();
+    const data = await CaseApi.getElectionRows(homeId, 2000);
     if (!data?.ok) return;
     electionMeta.rowCount = data.rowCount || 0;
     electionMeta.path = data.path || "";
@@ -4554,8 +4553,7 @@ async function loadElectionRows(home) {
     return;
   }
   try {
-    const res = await fetch(`/api/election/rows?homeId=${encodeURIComponent(homeId)}&limit=2000`);
-    const data = await res.json();
+    const data = await CaseApi.getElectionRows(homeId, 2000);
     if (!data?.ok) throw new Error(data?.error || "加载失败");
     electionMeta.rowCount = data.rowCount || 0;
     electionMeta.path = data.path || "";
@@ -4778,12 +4776,7 @@ async function tickElectionPoll(opts = {}) {
       devicesJson: JSON.stringify(master.devices || []),
     };
     if (homeId) {
-      const res = await fetch("/api/election/append", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ homeId, rows: [row] }),
-      });
-      const data = await res.json();
+      const { json: data } = await CaseApi.appendElection({ homeId, rows: [row] });
       if (!data?.ok) throw new Error(data?.error || "写入 CSV 失败");
       electionMeta.rowCount = data.rowCount || electionMeta.rowCount;
       electionMeta.path = data.path || electionMeta.path;
@@ -4838,10 +4831,15 @@ async function mountElectionPanel(home) {
 }
 
 function applyUiShell(shell) {
-  const next = shell === "auto" ? "auto" : "home";
+  const next = shell === "auto" ? "auto" : (shell === "monitor" ? "monitor" : "home");
   const changed = uiShell !== next;
   uiShell = next;
   document.body.classList.toggle("shell-auto", next === "auto");
+  document.body.classList.toggle("shell-monitor", next === "monitor");
+  const monView = document.getElementById("familyMonitorView");
+  if (monView) {
+    monView.classList.toggle("hidden", next !== "monitor");
+  }
   if (next === "auto") {
     homeTab = "auto";
   } else if (homeTab === "auto") {
@@ -4924,14 +4922,23 @@ function renderMain() {
   const empty = document.getElementById("emptyState");
   const view = document.getElementById("homeView");
   const lm = document.getElementById("loginMgrView");
+  const monView = document.getElementById("familyMonitorView");
   if (uiRoute === "loginMgr") {
     empty.classList.add("hidden");
     view.classList.add("hidden");
+    monView?.classList.add("hidden");
     if (lm) lm.classList.remove("hidden");
     renderLoginMgr();
     return;
   }
   if (lm) lm.classList.add("hidden");
+  if (uiShell === "monitor") {
+    empty.classList.add("hidden");
+    view.classList.add("hidden");
+    monView?.classList.remove("hidden");
+    return;
+  }
+  monView?.classList.add("hidden");
   if (uiShell === "auto") {
     empty.classList.add("hidden");
     view.classList.remove("hidden");
@@ -6821,7 +6828,7 @@ async function captureLiveViewCanvas() {
 }
 
 async function fetchScheduleWeekForSnapshot(home, device, kind) {
-  const res = await apiGet("/api/proxy/property-query", home, {
+  const res = await CaseApi.queryProperties(home, {
     page: "1",
     deviceId: device.deviceId,
   });
@@ -7487,6 +7494,82 @@ let atCaseFilterId = "";
 let atCaseFilterTarget = "";
 let atReplayOpen = false;
 let atInnerTab = "lib";
+
+const AT_LAB_CONSTRUCT_KEY = "caselib.atEnableLabConstruct";
+
+/**
+ * @brief Whether lab-only construct paths (PV/Bypass HAL) are enabled
+ * @return true when checkbox checked
+ * @note Default off — lab path not ready yet
+ */
+function _atLabConstructEnabled() {
+  const el = document.getElementById("atEnableLabConstruct")
+    || document.getElementById("atEnableLabConstructRun");
+  if (el) {
+    return !!el.checked;
+  }
+  try {
+    return localStorage.getItem(AT_LAB_CONSTRUCT_KEY) === "1";
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * @brief Keep lib/run lab checkboxes in sync and persist
+ * @param[in] fromEl optional checkbox that changed
+ * @return none
+ */
+function _atSyncLabConstructChecks(fromEl) {
+  const on = !!(fromEl ? fromEl.checked : _atLabConstructEnabled());
+  try {
+    localStorage.setItem(AT_LAB_CONSTRUCT_KEY, on ? "1" : "0");
+  } catch (_) {
+    /* ignore */
+  }
+  const a = document.getElementById("atEnableLabConstruct");
+  const b = document.getElementById("atEnableLabConstructRun");
+  if (a && a !== fromEl) {
+    a.checked = on;
+  }
+  if (b && b !== fromEl) {
+    b.checked = on;
+  }
+}
+
+/**
+ * @brief Wire lab-construct toggles (default unchecked)
+ * @return none
+ */
+function _atInitLabConstructToggle() {
+  let saved = false;
+  try {
+    saved = localStorage.getItem(AT_LAB_CONSTRUCT_KEY) === "1";
+  } catch (_) {
+    saved = false;
+  }
+  const a = document.getElementById("atEnableLabConstruct");
+  const b = document.getElementById("atEnableLabConstructRun");
+  if (a) {
+    a.checked = saved;
+  }
+  if (b) {
+    b.checked = saved;
+  }
+  const onChange = (ev) => {
+    _atSyncLabConstructChecks(ev.target);
+    if (atRunning) {
+      toast(ev.target.checked ? "已勾选实验室构造，下轮用例生效" : "已关闭实验室构造，下轮用例生效", "ok");
+      return;
+    }
+    renderAutoLib();
+    if (!atShowResults) {
+      renderAutoRun();
+    }
+  };
+  a?.addEventListener("change", onChange);
+  b?.addEventListener("change", onChange);
+}
 
 const AT_STEPS = [
   { key: "check", label: "开始前检查" },
@@ -8354,36 +8437,49 @@ function renderAutoLib() {
     devices: [{ uid: "_demo", name: "示例机", deviceId: "demo", values: { current_soc: 65, work_mode: "0", backup_soc: 20 } }],
   };
   const live = !!home;
+  const allowLab = _atLabConstructEnabled();
   const selectedUids = home ? _atEnsureSelected(home) : ["_demo"];
   const lib = typeof buildConstructLibrary === "function"
     ? buildConstructLibrary(home || demoHome, selectedUids)
     : { items: [], dps: [] };
   const map = (lib.items || []).map((item) => {
     const meta = AT_LIB_META[item.key] || { tone: "cc" };
-    const writable = (item.recipes || []).filter((r) => r.coverageKey !== "readonly_gap");
-    const ok = live ? item.writableN > 0 : writable.length > 0 && writable.some((r) => r.coverageKey !== "readonly_gap");
+    const writable = (item.recipes || []).filter((r) =>
+      r.coverageKey !== "readonly_gap" && (allowLab || !r.labOnly)
+    );
+    const ok = live
+      ? writable.some((r) => r.feasible)
+      : writable.length > 0;
     return `<button type="button" class="at-lib-map-item ${_atModelClass(item.target)} ${ok ? "" : "is-muted"}" data-lib-jump="${escapeAttr(item.key)}">` +
       `<b>${escapeHtml(item.short || item.target)}</b>` +
-      `<span>${live ? `${item.writableN}/${writable.length || 0}` : "示意"}</span>` +
+      `<span>${live ? `${writable.filter((r) => r.feasible).length}/${writable.length || 0}` : "示意"}</span>` +
     `</button>`;
   }).join("");
   const cards = (lib.items || []).map((item) => {
     const meta = AT_LIB_META[item.key] || { tone: "cc", how: item.rule };
     const recipes = item.recipes || [];
-    const writable = recipes.filter((r) => r.coverageKey !== "readonly_gap");
+    const writable = recipes.filter((r) =>
+      r.coverageKey !== "readonly_gap" && (allowLab || !r.labOnly)
+    );
     const blocked = recipes.filter((r) => r.coverageKey === "readonly_gap");
-    const core = writable.find((r) => !r.labOnly) || writable[0] || null;
+    const labHidden = !allowLab
+      ? recipes.filter((r) => r.labOnly && r.coverageKey !== "readonly_gap")
+      : [];
+    const core = writable.find((r) => !r.labOnly) || (allowLab ? writable[0] : null) || null;
     const reach = live
       ? (core
           ? `<span class="at-lib-reach ${core.feasible ? "ok" : ""}">${core.feasibleN}/${core.deviceN} 台能走到</span>`
-          : `<span class="at-lib-reach">无可写下发</span>`)
+          : `<span class="at-lib-reach">${labHidden.length ? "需启用实验室构造" : "无可写下发"}</span>`)
       : (core
           ? (item.key === "disabled"
               ? `<span class="at-lib-reach">页面构造不了 0x06</span>`
               : `<span class="at-lib-reach">SoC=65% 示意</span>`)
-          : `<span class="at-lib-reach">无可写下发</span>`);
+          : `<span class="at-lib-reach">${labHidden.length ? "需启用实验室构造" : "无可写下发"}</span>`);
     const blockedLine = blocked.length
       ? `<div class="at-lib-gaps">${blocked.map((r) => `<span>${escapeHtml(r.note)}</span>`).join("")}</div>`
+      : "";
+    const labOffLine = labHidden.length
+      ? `<div class="at-lib-gaps"><span>另有 ${labHidden.length} 条实验室路径（需勾选「启用实验室构造路径」）</span></div>`
       : "";
     return (
       `<article class="at-lib-card ${_atModelClass(item.target)}" id="at-lib-${escapeAttr(item.key)}">` +
@@ -8395,6 +8491,7 @@ function renderAutoLib() {
         _atLibFormulaHtml(item) +
         _atLibCombosHtml(writable, core) +
         blockedLine +
+        labOffLine +
       `</article>`
     );
   }).join("");
@@ -8403,8 +8500,11 @@ function renderAutoLib() {
       `<nav class="at-lib-map" id="atLibMap">${map}</nav>` +
       `<div class="at-lib-hero">` +
         `<div class="at-lib-flow">` +
-          `<span>读当前电量</span><i></i><span class="is-core">改 DP 或调现场</span><i></i><span>命中判定</span><i></i><span>目标工况</span>` +
+          `<span>读当前电量</span><i></i><span class="is-core">改 DP${allowLab ? " 或调现场" : ""}</span><i></i><span>命中判定</span><i></i><span>目标工况</span>` +
         `</div>` +
+        (allowLab
+          ? `<p class="at-lib-demo">已启用实验室构造：含 PV/Bypass/负载现场调节路径（尚未完全打通）。</p>`
+          : `<p class="at-lib-demo">实验室构造路径默认关闭，当前只展示可写 DP 路线。</p>`) +
         (live ? "" : `<p class="at-lib-demo">还没选家庭，下面用 65% 电量做示意。到「运行」里选家庭后会换成实机数字。</p>`) +
       `</div>` +
       `<div class="at-lib-grid">${cards}</div>` +
@@ -11042,8 +11142,7 @@ function _atReportFrameSet() {
 
 async function _atFetchReportList() {
   try {
-    const res = await fetch("/api/reports");
-    const json = await res.json();
+    const json = await CaseApi.listReports();
     return json.reports || [];
   } catch (_) {
     return [];
@@ -11080,8 +11179,7 @@ async function _atLoadReport(reportId) {
     return;
   }
   try {
-    const res = await fetch(`/api/report?id=${encodeURIComponent(reportId)}&fmt=json`);
-    const json = await res.json();
+    const { json } = await CaseApi.getReport(reportId, "json");
     if (!json.report) {
       toast("回放加载失败", "error");
       return;
@@ -11089,9 +11187,9 @@ async function _atLoadReport(reportId) {
     const report = json.report;
     if (!(report.cycles && report.cycles.length) && !report.markdown) {
       try {
-        const mdRes = await fetch(`/api/report?id=${encodeURIComponent(reportId)}&fmt=md`);
-        if (mdRes.ok) {
-          report.markdown = await mdRes.text();
+        const md = await CaseApi.getReport(reportId, "md");
+        if (md.res?.ok) {
+          report.markdown = md.text;
         }
       } catch (_) {}
     }
@@ -12115,10 +12213,7 @@ async function finishAutoTest(home, cycles, settle, extra = {}) {
   let reportJson = null;
   try {
     reportJson = _atReportPayload(home, cycles, settle, savedId, { status, planned, reportId: savedId });
-    const res = await fetch("/api/report/save", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const { json: j } = await CaseApi.saveReport({
         id: savedId,
         name: `${home.homeId || "home"}`,
         title: `${paused ? "自动回归(暂停)" : "自动回归"} · ${home.name || home.homeId}`,
@@ -12134,17 +12229,14 @@ async function finishAutoTest(home, cycles, settle, extra = {}) {
         markdown: md,
         csv,
         reportJson: _atPersistableReport(reportJson),
-      }),
-    });
-    const j = await res.json();
+      });
     savedId = j.id;
     atActiveReportId = savedId;
     if (savedId) {
       try {
-        const loaded = await fetch(`/api/report?id=${encodeURIComponent(savedId)}&fmt=json`);
-        const lj = await loaded.json();
-        if (lj.report) {
-          reportJson = lj.report;
+        const loaded = await CaseApi.getReport(savedId, "json");
+        if (loaded.json?.report) {
+          reportJson = loaded.json.report;
         }
       } catch (_) {}
     }
@@ -12226,12 +12318,7 @@ async function refreshSsoCookie(opts = {}) {
     url: host ? `https://${host}` : "",
   };
 
-  const res = await fetch("/api/sso/refresh", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const json = await res.json();
+  const { json } = await CaseApi.refreshSso(payload);
   if (!json.ok) {
     let msg = json.error || "自动获取失败";
     if (json.hint) msg = `${msg}（${json.hint}）`;
@@ -12300,18 +12387,14 @@ async function pushCookiesToRemote(opts = {}) {
     throw new Error(msg);
   }
   let res;
+  let json = {};
   try {
-    res = await fetch(`${remote}/api/cookies/import`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cookies, merge: true }),
-    });
+    ({ res, json } = await CaseApi.importCookies(remote, cookies, true));
   } catch (err) {
     const msg = `连不上虚拟机 ${remote}（${err?.message || err}）`;
     if (!quiet) toast(msg, "error");
     throw new Error(msg);
   }
-  const json = await res.json().catch(() => ({}));
   if (!res.ok || !json.ok) {
     const msg = json.error || `推送失败 HTTP ${res.status}`;
     if (!quiet) toast(msg, "error");
@@ -13069,7 +13152,7 @@ async function openManualScheduleDialog(home, device, opts = {}) {
   else dlg.setAttribute("open", "");
 
   try {
-    const res = await apiGet("/api/proxy/property-query", home, {
+    const res = await CaseApi.queryProperties(home, {
       page: "1",
       deviceId: device.deviceId,
     });
@@ -13153,7 +13236,7 @@ async function saveManualScheduleAndIssue() {
     const results = await Promise.all(
       targets.map(async (d) => {
         try {
-          const res = await apiPost("/api/proxy/issue", home, {
+          const res = await CaseApi.issueDevice(home, {
             devId: d.deviceId,
             timestamp: null,
             propertyList,
@@ -13335,7 +13418,7 @@ function bindEvents() {
       toast("缺少家庭 ID", "error");
       return;
     }
-    window.open(`/api/election/download?homeId=${encodeURIComponent(homeId)}`, "_blank");
+    window.open(`${CaseApi.PATHS.electionDownload}?homeId=${encodeURIComponent(homeId)}`, "_blank");
   });
   document.getElementById("btnElectionClear")?.addEventListener("click", async () => {
     const home = activeHome();
@@ -13343,12 +13426,7 @@ function bindEvents() {
     if (!homeId) return;
     if (!(await appConfirm("清空该家庭的选举趋势 CSV 记录？", { title: "清空记录" }))) return;
     try {
-      const res = await fetch("/api/election/clear", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ homeId }),
-      });
-      const data = await res.json();
+      const { json: data } = await CaseApi.clearElection({ homeId });
       if (!data?.ok) throw new Error(data?.error || "清空失败");
       electionTimeline = [];
       electionLastMasterId = null;
@@ -13392,6 +13470,7 @@ function bindEvents() {
     setAtInnerTab("run");
     renderAutoRun();
   });
+  _atInitLabConstructToggle();
   document.getElementById("btnAutoTestRun")?.addEventListener("click", () => runAutoTest());
   document.getElementById("btnAutoTestPause")?.addEventListener("click", () => pauseAutoTest());
   document.getElementById("btnLoginMgrAuto")?.addEventListener("click", async () => {
@@ -13960,6 +14039,264 @@ async function readAllActiveHome(opts = {}) {
   }
 }
 
+/**
+ * @brief Reply to parent shell for family monitor (list-homes / check)
+ * @param[in] data postMessage payload
+ * @param[in] origin target origin
+ * @return none
+ */
+async function handleFamilyMonitorMessage(data, origin) {
+  const requestId = data.requestId || "";
+  const reply = (payload) => {
+    try {
+      window.parent.postMessage({
+        type: "caselib-family-monitor-reply",
+        requestId,
+        ...payload,
+      }, origin || window.location.origin);
+    } catch (_) {}
+  };
+  try {
+    if (data.action === "list-homes") {
+      reply({
+        ok: true,
+        activeHomeId: state.activeHomeId || "",
+        homes: (state.homes || []).map((h) => ({
+          uid: h.uid,
+          homeId: h.homeId || h.uid,
+          name: h.name || h.homeId || h.uid,
+        })),
+      });
+      return;
+    }
+    if (data.action === "check") {
+      const result = await runFamilyMonitorCheck(data.homeId);
+      reply({ ok: true, ...result });
+      return;
+    }
+    reply({ ok: false, error: `未知动作 ${data.action || ""}` });
+  } catch (err) {
+    reply({ ok: false, error: String(err && err.message ? err.message : err) });
+  }
+}
+
+/**
+ * @brief Whether device should be included in family-monitor L1/L2
+ * @param[in] device device object
+ * @return true when online and device_cluster_role is present
+ * @note Offline or empty cluster role are skipped (not failed)
+ */
+function _monDeviceCheckable(device) {
+  if (!device) {
+    return false;
+  }
+  if (typeof deviceIsOnline === "function" && !deviceIsOnline(device)) {
+    return false;
+  }
+  const role = device.values?.device_cluster_role;
+  if (role == null || role === "") {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Paint monitor result with the same checker layout as auto-test report
+ * @param[in] html checker HTML
+ * @param[in] metaLine status text
+ * @return none
+ */
+function _monRenderCheckerHost(html, metaLine) {
+  const body = document.getElementById("familyMonitorBody");
+  const meta = document.getElementById("familyMonitorMeta");
+  if (meta) {
+    meta.textContent = metaLine || "";
+  }
+  if (!body) {
+    return;
+  }
+  body.innerHTML = html || `<div class="family-monitor-empty">无检查结果</div>`;
+  _atBindCheckerExplain(body);
+}
+
+/**
+ * @brief Persist a failed family-monitor check as a report (same store as auto-test)
+ * @param[in] home home object
+ * @param[in] cycle monitor cycle payload
+ * @param[in] summary short summary
+ * @return report id or ""
+ */
+async function _monPersistFailReport(home, cycle, summary) {
+  const cycles = [cycle];
+  const flat = cycle.results || [];
+  const passN = flat.filter((r) => r.pass).length;
+  const failN = flat.length - passN;
+  const reportJson = _atReportPayload(home, cycles, 0, null, {
+    status: "fail",
+    planned: 1,
+    reportId: null,
+  });
+  reportJson.kind = "family-monitor";
+  reportJson.status = "fail";
+  const md = `# 家庭监控失败报告\n\n- 家庭：${home.name || ""}（ID ${home.homeId || home.uid || ""}）\n` +
+    `- 时间：${new Date().toLocaleString("zh-CN")}\n- 摘要：${summary || "未通过"}\n` +
+    `- 设备组：${flat.length} · 通过 ${passN} · 失败 ${failN}\n`;
+  const csv = _atReportCsv(cycles);
+  try {
+    const { json: j } = await CaseApi.saveReport({
+        name: `${home.homeId || home.uid || "monitor"}`,
+        title: `家庭监控失败 · ${home.name || home.homeId || ""}`,
+        homeId: home.homeId || home.uid || "",
+        homeName: home.name || "",
+        summary: summary || "家庭监控未通过",
+        status: "fail",
+        planned: 1,
+        done: 1,
+        total: flat.length,
+        passed: passN,
+        failed: failN,
+        markdown: md,
+        csv,
+        reportJson: _atPersistableReport(reportJson),
+      });
+    return j?.id || "";
+  } catch (err) {
+    console.error("family monitor persist failed", err);
+    return "";
+  }
+}
+
+/**
+ * @brief Read home devices and evaluate L1–L3 for family monitor tab
+ * @param[in] homeId home uid
+ * @return monitor snapshot
+ * @note Layout reuses report checker; offline / empty cluster role skipped; fail → persist report
+ */
+async function runFamilyMonitorCheck(homeId) {
+  const uid = String(homeId || "").trim();
+  if (!uid) {
+    throw new Error("未指定家庭");
+  }
+  const home = (state.homes || []).find((h) => h.uid === uid || h.homeId === uid);
+  if (!home) {
+    throw new Error("家庭不存在，请先到实时运行配置");
+  }
+  const prevActive = state.activeHomeId;
+  state.activeHomeId = home.uid;
+  try {
+    await _atReadDevices(home, home.devices || []);
+    const checkable = (home.devices || []).filter(_monDeviceCheckable);
+    const skippedN = (home.devices || []).length - checkable.length;
+    const expect = typeof computeMasterExpect === "function"
+      ? computeMasterExpect(home, _atMasterOpts())
+      : { byUid: {} };
+    const homeFlow = _atHomeFlow({ ...home, devices: checkable });
+    const familyL3 = _atEvalFamilyL3(homeFlow);
+    const expectMeta = {
+      ...(typeof _atExpectMetaBrief === "function" ? _atExpectMetaBrief(expect, home) : {}),
+      l3: familyL3,
+    };
+    const results = [];
+    for (const dev of checkable) {
+      const owner = typeof classifyOwnerWorkModel === "function" ? classifyOwnerWorkModel(dev) : null;
+      const theory = owner && owner.label ? owner.label : "—";
+      const row = _atEvaluateAssignmentResult(
+        home,
+        {
+          uid: dev.uid,
+          deviceId: dev.deviceId,
+          device: dev.name || dev.deviceId,
+          target: theory,
+        },
+        expect,
+        null,
+        { role: "target" }
+      );
+      if (row) {
+        results.push(row);
+      }
+    }
+    const stats = _atCheckerStageStats(results, familyL3);
+    const pass = !stats.overallFail;
+    const parts = [];
+    if (stats.l1Fail) parts.push(`L1 ${stats.l1Fail}`);
+    if (stats.l2Fail) parts.push(`L2 ${stats.l2Fail}`);
+    if (stats.l3Fail) {
+      parts.push(familyL3.reverseFlow
+        ? (familyL3.bothWay ? "L3逆流+边充边放" : "L3逆流")
+        : "L3边充边放");
+    }
+    const summary = pass
+      ? (skippedN ? `全部通过（跳过 ${skippedN} 台离线/无集群身份）` : "全部通过")
+      : parts.join(" · ");
+    const checkedAt = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    let checkerHtml = "";
+    if (results.length) {
+      checkerHtml = _atCheckerTableHtml(results, expectMeta, homeFlow);
+    } else {
+      checkerHtml =
+        `<div class="at-checker-wrap at-checker-clean">` +
+          `<div class="at-chk-verdict is-ok">无可检设备` +
+            (skippedN ? `（已跳过 ${skippedN} 台离线/无集群身份）` : "") +
+          `</div>` +
+          _atCheckerL3SectionHtml(familyL3) +
+        `</div>`;
+    }
+
+    let reportId = "";
+    if (!pass) {
+      const tCheck = Date.now();
+      const cycle = {
+        no: 1,
+        label: "家庭监控巡检",
+        target: "monitor",
+        status: "fail",
+        failed: true,
+        tIssue: _nowHMS(tCheck),
+        tObserve: _nowHMS(tCheck),
+        issued: [],
+        results,
+        masterExpect: expectMeta,
+        homeFlow,
+        familyL3,
+        chg2Suppressed: !!expect.chg2Suppressed,
+        frames: [{
+          id: uid(),
+          at: tCheck,
+          time: _nowHMS(tCheck),
+          phase: "observe",
+          title: "家庭监控 · 检查失败",
+          note: summary,
+          stepOk: false,
+          emphasis: "fail",
+          checkerState: results,
+          masterExpect: expectMeta,
+          homeFlow,
+          familyState: _atFamilyState(home),
+        }],
+      };
+      reportId = await _monPersistFailReport(home, cycle, summary);
+    }
+
+    return {
+      pass,
+      summary,
+      checkedAt,
+      homeId: home.uid,
+      homeName: home.name || home.homeId || home.uid,
+      skippedN,
+      reportId,
+      checkerHtml,
+      results,
+      l3: familyL3,
+      homeFlow,
+      chg2Suppressed: !!expect.chg2Suppressed,
+    };
+  } finally {
+    state.activeHomeId = prevActive;
+  }
+}
+
 async function init() {
   if (window.self !== window.top) {
     document.documentElement.classList.add("embedded");
@@ -13980,6 +14317,14 @@ async function init() {
     if (data.type === "caselib-set-shell") {
       applyUiShell(data.shell);
     }
+    if (data.type === "caselib-ping") {
+      try {
+        window.parent.postMessage({ type: "caselib-pong" }, ev.origin || window.location.origin);
+      } catch (_) {}
+    }
+    if (data.type === "caselib-family-monitor") {
+      void handleFamilyMonitorMessage(data, ev.origin || window.location.origin);
+    }
   });
   bindEvents();
   try {
@@ -13998,6 +14343,11 @@ async function init() {
   if (!state.activeHomeId && state.homes.length) {
     state.activeHomeId = state.homes[0].uid;
   }
+  try {
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage({ type: "caselib-live-ready" }, window.location.origin);
+    }
+  } catch (_) {}
   render();
   setInterval(refreshRelativeTimes, 1000);
   syncAutoRefreshTimer();

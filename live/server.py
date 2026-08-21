@@ -508,6 +508,38 @@ def _send_csv_file(handler: SimpleHTTPRequestHandler, path: Path, download_name:
     handler.wfile.write(body)
 
 
+# Real upstream paths mirrored on this host (browser Network shows the real API).
+# Still uses X-Target-Host + X-Cookie; never calls tuya from the browser directly.
+_PROXY_PATH_PREFIXES = (
+    "/api/wireman-kong/",
+    "/api/smartenergy-kong/",
+    "/api/bizlog/",
+    "/inner/backendng/",
+    "/api/device/detail/",
+)
+
+# Legacy short aliases → real upstream path (keep old clients working)
+_PROXY_GET_ALIASES = {
+    "/api/proxy/pid-schema": "/api/wireman-kong/ems/energy-device/pid-schema",
+    "/api/proxy/property-query": "/api/wireman-kong/ems/energy-device/property/query",
+    "/api/proxy/protocol-query": "/api/wireman-kong/ems/energy-device/protocol/query",
+    "/api/proxy/protocol-model-page": "/api/wireman-kong/ems/protocol-model/query/page",
+    "/api/proxy/query-neko": "/api/wireman-kong/ems/energy-device/query-neko",
+    "/api/proxy/high-frequency": "/api/smartenergy-kong/group/high/frequency",
+}
+_PROXY_POST_ALIASES = {
+    "/api/proxy/issue": "/api/wireman-kong/ems/energy-device/issue",
+    "/api/proxy/group-device-issue": "/api/wireman-kong/ems/energy-group/device/issue",
+    "/api/proxy/shadow-property": "/api/wireman-kong/ems/energy-device/query-shadow-property",
+    "/api/proxy/bizlog-search": "/api/bizlog/search",
+    "/api/proxy/home-device": "/inner/backendng/device/homeDevice",
+}
+
+
+def _is_passthrough_proxy_path(path: str) -> bool:
+    return any(path.startswith(p) for p in _PROXY_PATH_PREFIXES)
+
+
 SSO_SCRIPT = Path(__file__).resolve().parent / "scripts" / "sso-token.mjs"
 SSO_DEFAULT_URL = "https://newenergy-operation-eu.tuya-inc.com"
 
@@ -905,25 +937,31 @@ class AppHandler(SimpleHTTPRequestHandler):
             return _json_response(self, 200, _beidou_dp_ability((qs.get("pid") or [""])[0]))
 
         if path == "/api/proxy/pid-schema":
-            return self._handle_proxy_get("/api/wireman-kong/ems/energy-device/pid-schema")
+            return self._handle_proxy_get(_PROXY_GET_ALIASES[path])
 
         if path == "/api/proxy/property-query":
-            return self._handle_proxy_get("/api/wireman-kong/ems/energy-device/property/query")
+            return self._handle_proxy_get(_PROXY_GET_ALIASES[path])
 
         if path == "/api/proxy/protocol-query":
-            return self._handle_proxy_get("/api/wireman-kong/ems/energy-device/protocol/query")
+            return self._handle_proxy_get(_PROXY_GET_ALIASES[path])
 
         if path == "/api/proxy/protocol-model-page":
-            return self._handle_proxy_get("/api/wireman-kong/ems/protocol-model/query/page")
+            return self._handle_proxy_get(_PROXY_GET_ALIASES[path])
 
         if path == "/api/proxy/query-neko":
-            return self._handle_proxy_get("/api/wireman-kong/ems/energy-device/query-neko")
+            return self._handle_proxy_get(_PROXY_GET_ALIASES[path])
 
         if path == "/api/proxy/high-frequency":
-            return self._handle_proxy_get("/api/smartenergy-kong/group/high/frequency")
+            return self._handle_proxy_get(_PROXY_GET_ALIASES[path])
 
         if path == "/api/proxy/device-detail":
             return self._handle_proxy_device_detail()
+
+        # Real upstream paths (preferred): browser Network shows wireman/backendng paths
+        if path.startswith("/api/device/detail/"):
+            return self._handle_proxy_device_detail_path(path)
+        if _is_passthrough_proxy_path(path):
+            return self._handle_proxy_get(path)
 
         if path == "/api/sso/status":
             node = _find_node_bin()
@@ -1081,22 +1119,23 @@ class AppHandler(SimpleHTTPRequestHandler):
             )
 
         if path == "/api/proxy/issue":
-            return self._handle_proxy_post("/api/wireman-kong/ems/energy-device/issue")
+            return self._handle_proxy_post(_PROXY_POST_ALIASES[path])
 
         if path == "/api/proxy/group-device-issue":
-            return self._handle_proxy_post("/api/wireman-kong/ems/energy-group/device/issue")
+            return self._handle_proxy_post(_PROXY_POST_ALIASES[path])
 
         if path == "/api/proxy/shadow-property":
-            return self._handle_proxy_post(
-                "/api/wireman-kong/ems/energy-device/query-shadow-property"
-            )
+            return self._handle_proxy_post(_PROXY_POST_ALIASES[path])
 
         if path == "/api/proxy/bizlog-search":
-            return self._handle_proxy_post("/api/bizlog/search")
+            return self._handle_proxy_post(_PROXY_POST_ALIASES[path])
 
         if path == "/api/proxy/home-device":
             # 家庭设备列表：POST {homeId, offset, limit} → backendng-<region>.tuya-inc.com
-            return self._handle_proxy_post("/inner/backendng/device/homeDevice")
+            return self._handle_proxy_post(_PROXY_POST_ALIASES[path])
+
+        if _is_passthrough_proxy_path(path):
+            return self._handle_proxy_post(path)
 
         if path == "/api/sso/refresh":
             body = _read_json(self)
@@ -1240,13 +1279,26 @@ class AppHandler(SimpleHTTPRequestHandler):
         return _json_response(self, 200 if payload.get("ok") else status, payload)
 
     def _handle_proxy_device_detail(self) -> None:
-        """GET backendng /api/device/detail/{deviceId} for module/MCU versions."""
+        """GET backendng /api/device/detail/{deviceId} for module/MCU versions (legacy ?deviceId=)."""
         host, cookie, err = self._proxy_meta()
         if err:
             return _json_response(self, 400, {"ok": False, "error": err})
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
         device_id = (qs.get("deviceId") or [""])[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", device_id):
+            return _json_response(self, 400, {"ok": False, "error": "invalid deviceId"})
+        status, payload = _proxy_upstream(
+            "GET", host, f"/api/device/detail/{device_id}", cookie or ""
+        )
+        return _json_response(self, 200 if payload.get("ok") else status, payload)
+
+    def _handle_proxy_device_detail_path(self, path: str) -> None:
+        """GET /api/device/detail/{deviceId} — real path shape for Network panel."""
+        host, cookie, err = self._proxy_meta()
+        if err:
+            return _json_response(self, 400, {"ok": False, "error": err})
+        device_id = path[len("/api/device/detail/") :].split("?", 1)[0].strip()
         if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", device_id):
             return _json_response(self, 400, {"ok": False, "error": "invalid deviceId"})
         status, payload = _proxy_upstream(

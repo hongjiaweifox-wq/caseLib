@@ -8,7 +8,7 @@
   <link rel="shortcut icon" href="/app-icon-20260806.png" />
   <link rel="apple-touch-icon" href="/app-icon-20260806.png" />
   <link rel="icon" href="/favicon.svg?v=20260806-57" type="image/svg+xml" />
-  <link rel="stylesheet" href="/style.css?v=20260820-caselib121" />
+  <link rel="stylesheet" href="/style.css?v=20260821-caselib129" />
 </head>
 <body>
   <div id="app" class="layout">
@@ -34,6 +34,13 @@
         <h2>还没有家庭</h2>
         <p>先选择环境并粘贴 Cookie，再新增家庭与设备。</p>
         <button type="button" class="btn btn-primary" id="btnEmptyAdd">+ 新增家庭</button>
+      </div>
+
+      <div id="familyMonitorView" class="hidden" aria-label="家庭监控检查结果">
+        <p class="family-monitor-meta" id="familyMonitorMeta">选择家庭后点「立即检查」，布局与自动化报告一致</p>
+        <div class="family-monitor-body" id="familyMonitorBody">
+          <div class="family-monitor-empty">等待检查…</div>
+        </div>
       </div>
 
       <div id="homeView" class="hidden">
@@ -128,6 +135,12 @@
           </div>
 
           <div id="atPanelLib" class="at-sub-panel">
+            <div class="at-run-toolbar">
+              <label class="at-opt" title="实验室路径需调 PV/Bypass/负载等现场量，当前尚未打通。默认关闭，只用可写 DP 构造。">
+                <input type="checkbox" id="atEnableLabConstruct" /> 启用实验室构造路径
+              </label>
+              <span class="hint">未勾选时：只展示/下发纯 DP 路线；勾选后才出现 Bypass/PV 等现场调节方案</span>
+            </div>
             <p class="hint hidden" id="autoTestHintLib">工况构造库：每个工况如何用可写 DP 下发组合达到。后续只维护本库。</p>
             <div id="autoTestLibBody"></div>
           </div>
@@ -139,6 +152,9 @@
               <label class="at-opt" title="家庭电网购电限值(规划中·非可读点位)。填了才启用充2抑制条件一：充1需求>电网限+三方光伏。留空则仅用条件二(可放总+三方)。">电网购电限(W)<input type="number" id="atGridBuyLimit" min="0" step="100" placeholder="留空=不用" style="width:96px" /></label>
               <label class="at-opt" title="三方光伏(W)。默认取各机 bypass 口三方光伏倒灌之和；可手动覆盖。">三方光伏(W)<input type="number" id="atThirdPv" min="0" step="100" placeholder="默认实测" style="width:88px" /></label>
               <label class="at-opt"><input type="checkbox" id="atRestore" checked /> 结束后恢复原参数</label>
+              <label class="at-opt" title="实验室路径需调 PV/Bypass/负载，当前未打通。默认关闭。">
+                <input type="checkbox" id="atEnableLabConstructRun" /> 启用实验室构造
+              </label>
               <button type="button" class="btn btn-ghost btn-sm" id="btnAutoTestReload">刷新用例</button>
               <button type="button" class="btn btn-ghost btn-sm hidden" id="btnAutoTestPause">暂停</button>
               <button type="button" class="btn btn-primary btn-sm" id="btnAutoTestRun">开始自动测试</button>
@@ -452,12 +468,13 @@
   <div id="toast" class="toast hidden"></div>
   <script src="/html2canvas.min.js"></script>
   <!-- 层3 checker 固件运行逻辑（对齐 CBE_RESONATE_MASTER）：先于 flow.js/app.js 加载 -->
-  <script src="/checker/device-model.js?v=20260820-caselib121"></script>
-  <script src="/checker/owner-model.js?v=20260820-caselib121"></script>
+  <script src="/checker/device-model.js?v=20260821-caselib129"></script>
+  <script src="/checker/owner-model.js?v=20260821-caselib129"></script>
   <script src="/checker/dp98.js?v=20260818-caselib42"></script>
-  <script src="/checker/cluster.js?v=20260820-caselib121"></script>
-  <script src="/checker/construct-lib.js?v=20260820-caselib121"></script>
-  <script src="/flow.js?v=20260820-caselib121"></script>
-  <script src="/app.js?v=20260820-caselib121"></script>
+  <script src="/checker/cluster.js?v=20260821-caselib129"></script>
+  <script src="/checker/construct-lib.js?v=20260821-caselib129"></script>
+  <script src="/lib/api-client.js?v=20260821-caselib129"></script>
+  <script src="/flow.js?v=20260821-caselib129"></script>
+  <script src="/app.js?v=20260821-caselib129"></script>
 </body>
 </html>

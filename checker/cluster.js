@@ -201,17 +201,28 @@ function getAutoTargetCatalog() {
   return AUTO_TARGET_CATALOG.map((item) => ({ ...item }));
 }
 
+function _atAllowLabConstruct() {
+  if (typeof _atLabConstructEnabled === "function") {
+    return !!_atLabConstructEnabled();
+  }
+  // Browser without helper → off; Node unit tests (no document) keep lab paths
+  return typeof document === "undefined";
+}
+
 function buildAutoDeviceScenarioPlan(device, home) {
   const current = classifyOwnerWorkModel(device);
+  const allowLab = _atAllowLabConstruct();
   const scenarios = getAutoTargetCatalog().map((target) => {
     const strategies = _atStrategiesForTarget(device, target.target, home);
-    const feasible = strategies.some((item) => item.feasible);
-    const shownStrategies = _atShownStrategies(strategies);
+    const usable = (strategies || []).filter((item) =>
+      item && item.feasible && item.coverageKey !== "natural" && (allowLab || !item.labOnly)
+    );
+    const naturalOk = (strategies || []).some((item) => item && item.feasible && item.coverageKey === "natural");
+    const feasible = usable.length > 0 || naturalOk;
+    const shownStrategies = _atShownStrategies(strategies, { allowLab });
     const visibleRecommended = shownStrategies[0]
-      || strategies.find((item) => item.feasible && item.coverageKey !== "natural" && !item.labOnly)
-      || strategies.find((item) => item.feasible && item.coverageKey !== "natural")
-      || strategies.find((item) => item.feasible)
-      || strategies[0]
+      || usable.find((item) => item.coverageKey !== "natural")
+      || (naturalOk ? strategies.find((item) => item.coverageKey === "natural" && item.feasible) : null)
       || null;
     return {
       key: target.key,
@@ -227,7 +238,9 @@ function buildAutoDeviceScenarioPlan(device, home) {
       recommended: visibleRecommended,
       note: feasible
         ? (visibleRecommended || {}).note || ""
-        : strategies.map((item) => item.note).filter(Boolean).join("；"),
+        : (allowLab
+          ? strategies.map((item) => item.note).filter(Boolean).join("；")
+          : "无可写 DP 路径（实验室构造未启用）"),
     };
   });
   return {
@@ -367,8 +380,12 @@ function _atStrategyGroupKey(strategy) {
   return strategy.coverageKey || strategy.key || "dp";
 }
 
-function _atShownStrategies(strategies) {
-  const feasible = (strategies || []).filter((item) => item && item.feasible && item.coverageKey !== "natural");
+function _atShownStrategies(strategies, opts) {
+  opts = opts || {};
+  const allowLab = opts.allowLab != null ? !!opts.allowLab : _atAllowLabConstruct();
+  const feasible = (strategies || []).filter((item) =>
+    item && item.feasible && item.coverageKey !== "natural" && (allowLab || !item.labOnly)
+  );
   if (!feasible.length) {
     return [];
   }

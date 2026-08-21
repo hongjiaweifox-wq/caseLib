@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>caseLib</title>
+<link rel="stylesheet" href="/style.css?v=20260821-caselib129" />
 <style>
   :root {
     --bg: #f3f4f6;
@@ -180,8 +181,49 @@
     background: #111827; color: #fff; border-color: transparent; font-weight: 600;
   }
   #btnDataLogin.on:hover { background: #000; }
+  .params-sub { display: none; flex: 1 1 auto; min-height: 0; flex-direction: column; }
+  .params-sub.on { display: flex; }
+  .params-subtabs { display: flex; gap: 6px; border-bottom: 1px solid var(--line); padding: 0 14px; background: var(--panel); flex-wrap: wrap; flex: 0 0 auto; }
+  .params-subtab {
+    border: 0; background: transparent; padding: 10px 14px; font-size: 13px; font-weight: 700;
+    color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .params-subtab:hover { color: var(--text); }
+  .params-subtab.on { color: #2563eb; border-bottom-color: #2563eb; }
+  .mon-bar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .mon-bar label { font-size: 12px; font-weight: 700; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+  .mon-bar select, .mon-bar input[type="number"] {
+    padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px;
+  }
+  .mon-body { padding: 12px 14px 24px; overflow: auto; flex: 1 1 auto; min-height: 0; }
+  .mon-checker-host { margin-bottom: 12px; }
+  .mon-log-sec { margin-top: 4px; }
+  .mon-verdict {
+    border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin-bottom: 12px;
+    font-weight: 800; font-size: 14px;
+  }
+  .mon-verdict.is-ok { background: #f0fdf4; border-color: #86efac; color: #166534; }
+  .mon-verdict.is-fail { background: #fff1f2; border-color: #fca5a5; color: #b91c1c; }
+  .mon-verdict.is-wait { background: #f8fafc; color: #64748b; }
+  .mon-sec {
+    border: 1px solid var(--line); border-radius: 12px; background: #fff;
+    padding: 12px; margin-bottom: 12px;
+  }
+  .mon-sec h4 { margin: 0 0 8px; font-size: 13px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .mon-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .mon-table th, .mon-table td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+  .mon-table th { background: #f8fafc; white-space: nowrap; }
+  .mon-table tr.is-fail td { background: #fff1f2; }
+  .mon-badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 800; }
+  .mon-badge.ok { background: #dcfce7; color: #15803d; }
+  .mon-badge.fail { background: #fee2e2; color: #b91c1c; }
+  .mon-badge.skip { background: #e2e8f0; color: #475569; }
+  .mon-log { font-size: 12px; color: var(--muted); max-height: 140px; overflow: auto; white-space: pre-wrap; }
   #panelParams {
-    overflow: auto; background: var(--bg);
+    overflow: hidden; background: var(--bg);
     flex-direction: column;
   }
   #panelKg { overflow: auto; background: var(--bg); }
@@ -363,7 +405,7 @@
       <h1>caseLib <span class="pill" id="svc">…</span></h1>
       <nav class="tabs" id="mainTabs">
         <button type="button" class="tab" data-tab="kg">知识图谱</button>
-        <button type="button" class="tab" data-tab="params">家庭参数</button>
+        <button type="button" class="tab" data-tab="params">家庭仿真</button>
         <button type="button" class="tab on" data-tab="live">实时运行</button>
         <button type="button" class="tab" data-tab="auto">自动化</button>
       </nav>
@@ -373,7 +415,7 @@
         <button type="button" id="btnNew">新建实验室</button>
         <button type="button" id="btnAuto">一键全接</button>
         <button type="button" id="btnClear">清空接线</button>
-        <button type="button" class="primary" id="btnSaveScene">保存家庭参数</button>
+        <button type="button" class="primary" id="btnSaveScene">保存家庭仿真</button>
       </div>
       <div class="actions" id="kgActions" style="display:none">
       </div>
@@ -539,7 +581,7 @@
 
   <div class="panel on" id="panelLive">
     <div class="live-body">
-      <iframe id="gacFrame" title="实时运行" src="/live.html?v=20260820-caselib121"></iframe>
+      <iframe id="gacFrame" title="实时运行" src="/live.html?v=20260821-caselib129"></iframe>
     </div>
   </div>
 
@@ -556,6 +598,35 @@
   </div>
 
   <div class="panel" id="panelParams">
+    <div class="params-subtabs" id="paramsSubtabs" role="tablist">
+      <button type="button" class="params-subtab on" data-params-tab="monitor" role="tab" aria-selected="true">家庭监控</button>
+      <button type="button" class="params-subtab" data-params-tab="source" role="tab" aria-selected="false">源调度</button>
+    </div>
+
+    <div class="params-sub on" id="paramsMon" role="tabpanel">
+      <div class="mon-bar">
+        <label>家庭
+          <select id="monHomeSelect"><option value="">加载中…</option></select>
+        </label>
+        <label>间隔(秒)
+          <input type="number" id="monIntervalSec" min="30" max="600" step="30" value="60" style="width:72px" />
+        </label>
+        <label title="勾选后按间隔自动巡检"><input type="checkbox" id="monAuto" checked /> 自动巡检</label>
+        <button type="button" class="mini primary" id="btnMonCheckNow">立即检查</button>
+        <button type="button" class="mini" id="btnMonRefreshHomes">刷新家庭列表</button>
+        <span class="hint" id="monStatusHint">选择家庭后，每分钟检查 L1–L3（布局同报告）</span>
+      </div>
+      <div class="mon-body">
+        <div class="mon-verdict is-wait" id="monVerdict">尚未检查</div>
+        <div class="mon-checker-host" id="monCheckerHost"><p class="hint">检查结果将显示在这里（布局同自动化报告）</p></div>
+        <div class="mon-sec mon-log-sec">
+          <h4>巡检日志</h4>
+          <div class="mon-log" id="monLog">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="params-sub" id="paramsSource" role="tabpanel">
     <div class="lab-bar" id="labBar">
       <label class="field">家庭名<input type="text" id="homeName" value="实验室家庭" /></label>
       <label class="field">设备数
@@ -592,7 +663,7 @@
       <input type="file" id="importFile" accept=".xlsx,.xlsm,.xltx,.csv,.txt" style="display:none" />
       <div class="params-side">
         <div class="pcard">
-          <h3>参数模板 <span class="sub">整套家庭参数 · 另存/切换/编辑</span></h3>
+          <h3>参数模板 <span class="sub">整套家庭仿真 · 另存/切换/编辑</span></h3>
           <label class="field">选择模板
             <select id="tplSelect"><option value="">—（当前未套用模板）</option></select>
           </label>
@@ -700,6 +771,7 @@
           <p class="summary" id="resolveMeta">—</p>
         </div>
       </div>
+    </div>
     </div>
   </div>
 
@@ -815,6 +887,7 @@
     selectedDevices: new Set(),
     modelCatalog: [],
     activeTab: "live",
+    paramsSubTab: "monitor",
     sceneCatalog: null,
     scene: null,
     sceneEdit: { active: "", pv: [], load: [], grid: [], offgrid: [], ceil: 600, drag: null, seeded: false },
@@ -2582,7 +2655,7 @@
   }
 
   async function saveAsTemplate() {
-    const suggest = (state.sceneTemplates.find((t) => t.id === state.activeTplId) || {}).name || "家庭参数模板";
+    const suggest = (state.sceneTemplates.find((t) => t.id === state.activeTplId) || {}).name || "家庭仿真模板";
     const name = prompt("模板名称：", suggest);
     if (name == null || !name.trim()) return;
     await withApi(async () => {
@@ -3278,7 +3351,7 @@
 
   function initLivePanel() {
     const frame = $("gacFrame");
-    if (frame && !frame.getAttribute("src")) frame.setAttribute("src", "/live.html?v=20260820-caselib121");
+    if (frame && !frame.getAttribute("src")) frame.setAttribute("src", "/live.html?v=20260821-caselib129");
   }
 
   function switchTab(tab) {
@@ -3294,7 +3367,7 @@
     $("panelParams").classList.toggle("on", state.activeTab === "params");
     $("panelKg").classList.toggle("on", state.activeTab === "kg");
     $("panelLive").classList.toggle("on", state.activeTab === "live" || state.activeTab === "auto" || state.activeTab === "login");
-    $("paramsActions").style.display = state.activeTab === "params" ? "" : "none";
+    syncParamsActions();
     $("kgActions").style.display = state.activeTab === "kg" ? "" : "none";
     try {
       const hashMap = { params: "#params", kg: "#kg", live: "#live", auto: "#auto", login: "#login" };
@@ -3302,23 +3375,345 @@
     } catch (_) {}
     if (state.activeTab === "params") {
       if (prev === "login") postToLive({ type: "caselib-close-login-mgr" });
-      withApi(() => initScenePanel(), "加载家庭参数失败");
-    } else if (state.activeTab === "kg") {
-      if (prev === "login") postToLive({ type: "caselib-close-login-mgr" });
-      withApi(() => initKgPanel(), "加载知识图谱失败");
-    } else if (state.activeTab === "login") {
       initLivePanel();
-      const frame = $("gacFrame");
-      if (frame) frame.title = "数据区登录态";
-      postToLiveSoon({ type: "caselib-open-login-mgr" });
-    } else if (state.activeTab === "live" || state.activeTab === "auto") {
-      initLivePanel();
-      const frame = $("gacFrame");
-      if (frame) frame.title = state.activeTab === "auto" ? "自动化" : "实时运行";
-      if (prev === "login") {
-        postToLive({ type: "caselib-close-login-mgr" });
+      switchParamsSubTab(state.paramsSubTab || "monitor");
+    } else {
+      stopFamilyMonitor();
+      if (state.activeTab === "kg") {
+        if (prev === "login") postToLive({ type: "caselib-close-login-mgr" });
+        withApi(() => initKgPanel(), "加载知识图谱失败");
+      } else if (state.activeTab === "login") {
+        initLivePanel();
+        const frame = $("gacFrame");
+        if (frame) frame.title = "数据区登录态";
+        postToLiveSoon({ type: "caselib-open-login-mgr" });
+      } else if (state.activeTab === "live" || state.activeTab === "auto") {
+        initLivePanel();
+        const frame = $("gacFrame");
+        if (frame) frame.title = state.activeTab === "auto" ? "自动化" : "实时运行";
+        if (prev === "login") {
+          postToLive({ type: "caselib-close-login-mgr" });
+        }
+        postToLiveSoon({ type: "caselib-set-shell", shell: state.activeTab === "auto" ? "auto" : "home" });
       }
-      postToLiveSoon({ type: "caselib-set-shell", shell: state.activeTab === "auto" ? "auto" : "home" });
+    }
+  }
+
+  function syncParamsActions() {
+    const show = state.activeTab === "params" && state.paramsSubTab === "source";
+    $("paramsActions").style.display = show ? "" : "none";
+  }
+
+  function switchParamsSubTab(tab) {
+    const next = tab === "source" ? "source" : "monitor";
+    state.paramsSubTab = next;
+    document.querySelectorAll("#paramsSubtabs .params-subtab").forEach((btn) => {
+      const on = btn.getAttribute("data-params-tab") === next;
+      btn.classList.toggle("on", on);
+      btn.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    $("paramsMon")?.classList.toggle("on", next === "monitor");
+    $("paramsSource")?.classList.toggle("on", next === "source");
+    syncParamsActions();
+    if (next === "source") {
+      stopFamilyMonitor();
+      withApi(() => initScenePanel(), "加载家庭仿真失败");
+    } else {
+      initLivePanel();
+      startFamilyMonitorUi();
+    }
+  }
+
+  /* ---- 家庭监控：经 live iframe 巡检 L1–L3 ---- */
+  const monState = {
+    timer: null,
+    pending: new Map(),
+    logs: [],
+    last: null,
+    reqSeq: 0,
+    liveReady: false,
+    readyWaiters: [],
+  };
+
+  function markLiveReady() {
+    monState.liveReady = true;
+    const waiters = monState.readyWaiters.splice(0);
+    waiters.forEach((fn) => {
+      try { fn(); } catch (_) {}
+    });
+  }
+
+  function waitLiveReady(ms) {
+    if (monState.liveReady) {
+      return Promise.resolve();
+    }
+    const timeoutMs = Math.max(2000, Number(ms) || 20000);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        monState.readyWaiters = monState.readyWaiters.filter((fn) => fn !== onReady);
+        reject(new Error("实时运行页未就绪（请稍候或先打开「实时运行」）"));
+      }, timeoutMs);
+      const onReady = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      monState.readyWaiters.push(onReady);
+      postToLiveSoon({ type: "caselib-ping" });
+    });
+  }
+
+  function monLog(line) {
+    const t = new Date();
+    const stamp = [t.getHours(), t.getMinutes(), t.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
+    monState.logs.unshift(`[${stamp}] ${line}`);
+    monState.logs = monState.logs.slice(0, 40);
+    const el = $("monLog");
+    if (el) el.textContent = monState.logs.join("\n") || "—";
+  }
+
+  function monBadge(el, kind, text) {
+    if (!el) return;
+    el.className = "mon-badge " + (kind || "skip");
+    el.textContent = text || "—";
+  }
+
+  function askLiveMonitor(action, extra) {
+    return new Promise(async (resolve, reject) => {
+      initLivePanel();
+      try {
+        await waitLiveReady(20000);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      const requestId = `mon_${Date.now()}_${++monState.reqSeq}`;
+      const timer = setTimeout(() => {
+        monState.pending.delete(requestId);
+        reject(new Error("实时运行页未响应（请先打开过「实时运行」并完成登录）"));
+      }, 45000);
+      monState.pending.set(requestId, { resolve, reject, timer });
+      postToLiveSoon({ type: "caselib-family-monitor", action, requestId, ...(extra || {}) });
+    });
+  }
+
+  function onLiveMonitorReply(data) {
+    const pending = monState.pending.get(data.requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    monState.pending.delete(data.requestId);
+    if (data.ok === false) pending.reject(new Error(data.error || "检查失败"));
+    else pending.resolve(data);
+  }
+
+  async function refreshMonitorHomes() {
+    const sel = $("monHomeSelect");
+    if (!sel) return;
+    try {
+      const data = await askLiveMonitor("list-homes");
+      const homes = data.homes || [];
+      const keep = sel.value;
+      sel.innerHTML = homes.length
+        ? homes.map((h) =>
+            `<option value="${escapeAttr(h.uid || h.homeId || "")}">${escapeHtml(h.name || h.homeId || h.uid || "—")}</option>`
+          ).join("")
+        : `<option value="">暂无家庭（请先到实时运行配置）</option>`;
+      if (keep && [...sel.options].some((o) => o.value === keep)) sel.value = keep;
+      else if (data.activeHomeId) sel.value = data.activeHomeId;
+      monLog(`家庭列表 ${homes.length} 个`);
+    } catch (err) {
+      sel.innerHTML = `<option value="">加载失败</option>`;
+      monLog(`刷新家庭失败：${err.message || err}`);
+      setMonHint(String(err.message || err), true);
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[c]);
+  }
+  function escapeAttr(s) {
+    return escapeHtml(s).replace(/\n/g, " ");
+  }
+
+  function setMonHint(text, isErr) {
+    const el = $("monStatusHint");
+    if (!el) return;
+    el.textContent = text || "";
+    el.style.color = isErr ? "#b91c1c" : "";
+  }
+
+  function renderMonitorResult(payload) {
+    monState.last = payload;
+    const v = $("monVerdict");
+    const pass = !!payload.pass;
+    if (v) {
+      v.className = "mon-verdict " + (pass ? "is-ok" : "is-fail");
+      const skipNote = payload.skippedN ? ` · 已跳过 ${payload.skippedN} 台（离线/无集群身份）` : "";
+      const reportNote = payload.reportId ? ` · 已存报告 ${payload.reportId}` : "";
+      v.textContent = pass
+        ? `通过 · ${payload.homeName || ""} · ${payload.checkedAt || ""}${skipNote}`
+        : `未通过 · ${payload.homeName || ""} · ${payload.summary || ""} · ${payload.checkedAt || ""}${skipNote}${reportNote}`;
+    }
+    const host = $("monCheckerHost");
+    if (host) {
+      host.dataset.monFxBound = "";
+      host.innerHTML = payload.checkerHtml
+        || `<p class="hint">${pass ? "通过，无详细表" : "无检查明细"}</p>`;
+      bindMonitorCheckerUi(host);
+    }
+  }
+
+  function bindMonitorCheckerUi(root) {
+    if (!root || root.dataset.monFxBound === "1") return;
+    root.dataset.monFxBound = "1";
+    root.addEventListener("click", (ev) => {
+      const foldBtn = ev.target.closest("[data-chk-fold]");
+      if (foldBtn && root.contains(foldBtn)) {
+        const sec = foldBtn.closest("[data-chk-fold-sec]");
+        if (sec) {
+          const open = sec.classList.toggle("is-collapsed") === false;
+          foldBtn.setAttribute("aria-expanded", open ? "true" : "false");
+        }
+        return;
+      }
+      const passBtn = ev.target.closest("[data-chk-pass]");
+      if (passBtn && root.contains(passBtn)) {
+        showMonitorExplainFromResult(passBtn.getAttribute("data-chk-pass"), passBtn.getAttribute("data-uid"));
+        return;
+      }
+      const l3Btn = ev.target.closest("[data-chk-l3]");
+      if (l3Btn && root.contains(l3Btn)) {
+        showMonitorExplainL3(l3Btn.getAttribute("data-chk-l3"));
+        return;
+      }
+      const homeBtn = ev.target.closest("[data-chk-home]");
+      if (homeBtn && root.contains(homeBtn)) {
+        showMonitorExplainText("家庭数据", "点击项：" + (homeBtn.getAttribute("data-chk-home") || "") +
+          "\n完整公式说明请到「自动化 → 报告」中查看同结构检查页。");
+        return;
+      }
+      const bandBtn = ev.target.closest("[data-chk-band]");
+      if (bandBtn && root.contains(bandBtn)) {
+        showMonitorExplainFromResult("l2", bandBtn.getAttribute("data-uid"));
+      }
+    });
+  }
+
+  function ensureMonExplainDlg() {
+    let dlg = $("dlgMonChkExplain");
+    if (dlg) return dlg;
+    dlg = document.createElement("dialog");
+    dlg.id = "dlgMonChkExplain";
+    dlg.className = "modal modal-wide";
+    dlg.innerHTML =
+      `<div class="modal-card">` +
+        `<h3 id="monChkExplainTitle">公式说明</h3>` +
+        `<div id="monChkExplainBody" class="at-chk-explain-body at-chk-explain-dlg" style="white-space:pre-wrap"></div>` +
+        `<div class="modal-actions"><button type="button" class="btn btn-primary" id="btnMonChkExplainClose">关闭</button></div>` +
+      `</div>`;
+    document.body.appendChild(dlg);
+    dlg.querySelector("#btnMonChkExplainClose")?.addEventListener("click", () => dlg.close());
+    dlg.addEventListener("click", (ev) => { if (ev.target === dlg) dlg.close(); });
+    return dlg;
+  }
+
+  function showMonitorExplainText(title, text) {
+    const dlg = ensureMonExplainDlg();
+    const t = $("monChkExplainTitle");
+    const b = $("monChkExplainBody");
+    if (t) t.textContent = title || "说明";
+    if (b) b.textContent = text || "—";
+    if (typeof dlg.showModal === "function") dlg.showModal();
+    else dlg.setAttribute("open", "");
+  }
+
+  function showMonitorExplainFromResult(kind, uid) {
+    const list = monState.last?.results || [];
+    const r = list.find((item) => String(item.uid || item.deviceId || "") === String(uid || ""));
+    if (!r) {
+      showMonitorExplainText("说明", "未找到该设备检查明细");
+      return;
+    }
+    const lines = [
+      `设备：${r.device || "—"} (${r.deviceId || ""})`,
+      `读回：${r.theory || "—"}`,
+      kind === "l1"
+        ? (r.l1Formula || `目标 ${r.target || "—"} · hitTarget=${r.hitTarget}`)
+        : (r.l2Formula || r.masterNote || r.failReason || "—"),
+    ];
+    showMonitorExplainText(kind === "l1" ? "L1 说明" : "L2 说明", lines.join("\n\n"));
+  }
+
+  function showMonitorExplainL3(kind) {
+    const l3 = monState.last?.l3;
+    if (!l3) {
+      showMonitorExplainText("L3", "无家庭异常数据");
+      return;
+    }
+    if (kind === "both") {
+      showMonitorExplainText("L3 · AC边充边放",
+        `充 ${l3.actChg}W · 放 ${l3.actDchg}W\n阈值 ${l3.bothEps}W\n通过=${l3.bothPass}`);
+    } else {
+      showMonitorExplainText("L3 · 逆流",
+        `gridW=${l3.gridW == null ? "无电表" : l3.gridW}\n通过=${l3.reversePass}`);
+    }
+  }
+
+  async function runFamilyMonitorCheck() {
+    const homeId = $("monHomeSelect")?.value || "";
+    if (!homeId) {
+      setMonHint("请先选择家庭", true);
+      return;
+    }
+    setMonHint("检查中…");
+    try {
+      const data = await askLiveMonitor("check", { homeId });
+      renderMonitorResult(data);
+      monLog(data.pass
+        ? `通过 · ${data.homeName || homeId}`
+        : `未通过 · ${data.summary || ""}${data.reportId ? ` · 报告 ${data.reportId}` : ""}`);
+      setMonHint(data.pass
+        ? "最近一次：通过"
+        : (data.reportId ? `最近一次：未通过（已存 ${data.reportId}）` : "最近一次：未通过"), !data.pass);
+    } catch (err) {
+      monLog(`检查失败：${err.message || err}`);
+      setMonHint(String(err.message || err), true);
+      const v = $("monVerdict");
+      if (v) {
+        v.className = "mon-verdict is-fail";
+        v.textContent = `检查失败：${err.message || err}`;
+      }
+    }
+  }
+
+  function monIntervalMs() {
+    const sec = Number($("monIntervalSec")?.value || 60);
+    return Math.max(30, Math.min(600, Number.isFinite(sec) ? sec : 60)) * 1000;
+  }
+
+  function stopFamilyMonitor() {
+    if (monState.timer) {
+      clearInterval(monState.timer);
+      monState.timer = null;
+    }
+  }
+
+  function armFamilyMonitorTimer() {
+    stopFamilyMonitor();
+    if (state.activeTab !== "params" || state.paramsSubTab !== "monitor") return;
+    if (!$("monAuto")?.checked) return;
+    monState.timer = setInterval(() => {
+      void runFamilyMonitorCheck();
+    }, monIntervalMs());
+  }
+
+  async function startFamilyMonitorUi() {
+    setMonHint("选择家庭后，按间隔自动检查 L1–L3");
+    await refreshMonitorHomes();
+    armFamilyMonitorTimer();
+    if ($("monAuto")?.checked && $("monHomeSelect")?.value) {
+      void runFamilyMonitorCheck();
     }
   }
 
@@ -3680,8 +4075,32 @@
     if (data.type === "caselib-close-login-mgr" && state.activeTab === "login") {
       switchTab(state.prevTab && state.prevTab !== "login" ? state.prevTab : "live");
     }
+    if (data.type === "caselib-live-ready" || data.type === "caselib-pong") {
+      markLiveReady();
+    }
+    if (data.type === "caselib-family-monitor-reply") {
+      onLiveMonitorReply(data);
+    }
   });
-  $("btnSaveScene").addEventListener("click", () => withApi(() => saveSceneToHome(), "保存家庭参数失败"));
+  document.querySelectorAll("#paramsSubtabs .params-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => switchParamsSubTab(btn.getAttribute("data-params-tab")));
+  });
+  $("btnMonCheckNow")?.addEventListener("click", () => void runFamilyMonitorCheck());
+  $("btnMonRefreshHomes")?.addEventListener("click", () => void refreshMonitorHomes());
+  $("monAuto")?.addEventListener("change", () => {
+    if ($("monAuto").checked) {
+      armFamilyMonitorTimer();
+      void runFamilyMonitorCheck();
+    } else {
+      stopFamilyMonitor();
+      setMonHint("已关闭自动巡检");
+    }
+  });
+  $("monIntervalSec")?.addEventListener("change", () => armFamilyMonitorTimer());
+  $("monHomeSelect")?.addEventListener("change", () => {
+    if ($("monAuto")?.checked) void runFamilyMonitorCheck();
+  });
+  $("btnSaveScene").addEventListener("click", () => withApi(() => saveSceneToHome(), "保存家庭仿真失败"));
   ["pvCurve", "loadCurve", "stepMin", "durationMin", "pvScale", "loadScale", "backflowW"].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("change", () => previewScene());
