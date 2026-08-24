@@ -13,6 +13,7 @@
 const CASE_API_PATHS = Object.freeze({
   /* Upstream paths (local server proxies 1:1; Network 面板可见真实接口) */
   propertyQuery: "/api/wireman-kong/ems/energy-device/property/query",
+  /** @deprecated live read uses deviceDetail.dataPoints instead */
   shadowProperty: "/api/wireman-kong/ems/energy-device/query-shadow-property",
   pidSchema: "/api/wireman-kong/ems/energy-device/pid-schema",
   issue: "/api/wireman-kong/ems/energy-device/issue",
@@ -23,7 +24,10 @@ const CASE_API_PATHS = Object.freeze({
   queryNeko: "/api/wireman-kong/ems/energy-device/query-neko",
   bizlogSearch: "/api/bizlog/search",
   homeDevice: "/inner/backendng/device/homeDevice",
-  /** prefix; append deviceId → /api/device/detail/{id} */
+  /**
+   * prefix; append deviceId → /api/device/detail/{id}
+   * Live DPs: result.dataPoints; SSID: result.deviceMetaShowVOList[ssid_hash]
+   */
   deviceDetail: "/api/device/detail/",
 
   /* Local live service */

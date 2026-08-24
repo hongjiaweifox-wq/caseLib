@@ -111,8 +111,20 @@ const BIZLOG_EVENT_IDS =
 // [moved → checker/device-model.js] DEVICE_MODELS / UNKNOWN_MODEL
 
 const DP_DISPLAY = [
-  { code: "pv_power_total", label: "发电功率", unit: "W", tone: "", aliases: ["pv_power_total", "total_photovoltaic_power"] },
-  { code: "battery_power", label: "电池功率", unit: "W", tone: "green", aliases: ["battery_power"] },
+  {
+    code: "pv_power_total",
+    label: "发电功率",
+    unit: "W",
+    tone: "",
+    aliases: ["pv_power_total", "total_photovoltaic_power"],
+  },
+  {
+    code: "battery_power",
+    label: "电池功率",
+    unit: "W",
+    tone: "green",
+    aliases: ["battery_power", "total_stack_power"],
+  },
   {
     code: "grid_port_power",
     label: "并网口",
@@ -121,34 +133,40 @@ const DP_DISPLAY = [
     // DP27：勿与 DP26 grid_power/meter_power（局域网电表配对功率）混用
     aliases: ["grid_port_power", "inverter_output_power"],
   },
-  { code: "current_soc", label: "SOC", unit: "%", tone: "", aliases: ["current_soc", "main_soc"] },
   {
-    code: "battery_charging_power_grid",
+    code: "current_soc",
+    label: "SOC",
+    unit: "%",
+    tone: "",
+    aliases: ["current_soc", "main_soc", "heap_soc"],
+  },
+  {
+    code: "offgrid1_export_power",
     label: "离网口",
     unit: "W",
     tone: "",
-    aliases: ["offgrid1_export_power", "battery_charging_power_grid"],
+    aliases: ["offgrid1_export_power"],
   },
 ];
 
 const DP_EDITABLE = [
   {
     code: "backup_soc",
-    label: "备用 SOC",
+    label: "备用SOC",
     unit: "%",
     aliases: ["backup_soc", "backup_reserve", "min_soc_discharge"],
   },
   {
     code: "regulation_grid_export_p_limit",
-    label: "法规输出上限(取小)",
+    label: "输出最大值",
     unit: "W",
     useModelMax: true,
     aliases: ["regulation_grid_export_p_limit"],
   },
-  { code: "output_power_limit", label: "AC输出限制", unit: "W", aliases: ["output_power_limit"] },
+  { code: "output_power_limit", label: "输出限制", unit: "W", aliases: ["output_power_limit"] },
   {
     code: "inverter_input_power_limit",
-    label: "AC输入限制",
+    label: "输入限制",
     unit: "W",
     aliases: ["inverter_input_power_limit"],
   },
@@ -382,10 +400,18 @@ function openOwnerStrategyDialog(home, device) {
 
 // [moved → checker/dp98.js] DP98 command_receive parse/pick/apply
 
-/** 一体机「更多点位」对照表（dpid / dpcode / 物模型 code） */
+/** 一体机「更多点位」对照表（维度 / dpid / dpcode / 物模型 code） */
 const DEVICE_MORE_POINTS = [
-  { dpId: "51", dpCode: "work_mode", modelCode: "work_mode", unit: "", valueKeys: ["work_mode"] },
   {
+    label: "家庭-工作模式",
+    dpId: "51",
+    dpCode: "work_mode",
+    modelCode: "work_mode",
+    unit: "",
+    valueKeys: ["work_mode"],
+  },
+  {
+    label: "家庭-最大电流限制",
     dpId: "52",
     dpCode: "function_set",
     modelCode: "home_max_current",
@@ -393,6 +419,7 @@ const DEVICE_MORE_POINTS = [
     valueKeys: ["home_max_current"],
   },
   {
+    label: "家庭-逆流上限功率",
     dpId: "52",
     dpCode: "function_set",
     modelCode: "home_allowed_backflow_power",
@@ -400,6 +427,7 @@ const DEVICE_MORE_POINTS = [
     valueKeys: ["home_allowed_backflow_power"],
   },
   {
+    label: "家庭-插座功率",
     dpId: "52",
     dpCode: "function_set",
     modelCode: "total_plug_power",
@@ -407,6 +435,7 @@ const DEVICE_MORE_POINTS = [
     valueKeys: ["total_plug_power"],
   },
   {
+    label: "集群角色",
     dpId: "52",
     dpCode: "function_set",
     modelCode: "device_cluster_role",
@@ -414,14 +443,23 @@ const DEVICE_MORE_POINTS = [
     valueKeys: ["device_cluster_role"],
   },
   {
+    label: "集群身份id",
     dpId: "52",
     dpCode: "function_set",
     modelCode: "device_cluster_node_id",
     unit: "",
     valueKeys: ["device_cluster_node_id"],
   },
-  { dpId: "91", dpCode: "base_load", modelCode: "base_load", unit: "W", valueKeys: ["base_load"] },
   {
+    label: "家庭-基础负载功率",
+    dpId: "91",
+    dpCode: "base_load",
+    modelCode: "base_load",
+    unit: "W",
+    valueKeys: ["base_load"],
+  },
+  {
+    label: "发电功率",
     dpId: "20",
     dpCode: "pv_power_total",
     modelCode: "total_photovoltaic_power",
@@ -429,6 +467,7 @@ const DEVICE_MORE_POINTS = [
     valueKeys: ["pv_power_total", "total_photovoltaic_power"],
   },
   {
+    label: "电池功率",
     dpId: "25",
     dpCode: "battery_power",
     modelCode: "total_stack_power",
@@ -436,6 +475,15 @@ const DEVICE_MORE_POINTS = [
     valueKeys: ["battery_power", "total_stack_power"],
   },
   {
+    label: "电池容量",
+    dpId: "2",
+    dpCode: "battery_capacity",
+    modelCode: "battery_capacity",
+    unit: "kWh",
+    valueKeys: ["battery_capacity"],
+  },
+  {
+    label: "并网口",
     dpId: "27",
     dpCode: "inverter_output_power",
     modelCode: "grid_port_power",
@@ -443,13 +491,7 @@ const DEVICE_MORE_POINTS = [
     valueKeys: ["grid_port_power", "inverter_output_power"],
   },
   {
-    dpId: "26",
-    dpCode: "grid_power",
-    modelCode: "meter_power",
-    unit: "W",
-    valueKeys: ["meter_power", "grid_power"],
-  },
-  {
+    label: "SOC",
     dpId: "23",
     dpCode: "current_soc",
     modelCode: "heap_soc",
@@ -457,13 +499,15 @@ const DEVICE_MORE_POINTS = [
     valueKeys: ["current_soc", "main_soc", "heap_soc"],
   },
   {
+    label: "离网口",
     dpId: "38",
     dpCode: "offgrid1_export_power",
     modelCode: "offgrid1_export_power",
     unit: "W",
-    valueKeys: ["offgrid1_export_power", "battery_charging_power_grid"],
+    valueKeys: ["offgrid1_export_power"],
   },
   {
+    label: "备用SOC",
     dpId: "50",
     dpCode: "backup_reserve",
     modelCode: "min_soc_discharge",
@@ -471,6 +515,7 @@ const DEVICE_MORE_POINTS = [
     valueKeys: ["backup_soc", "backup_reserve", "min_soc_discharge"],
   },
   {
+    label: "输出最大值",
     dpId: "84",
     dpCode: "regulation_grid_export_p_limit",
     modelCode: "regulation_grid_export_p_limit",
@@ -478,6 +523,7 @@ const DEVICE_MORE_POINTS = [
     valueKeys: ["regulation_grid_export_p_limit"],
   },
   {
+    label: "输出限制",
     dpId: "53",
     dpCode: "output_power_limit",
     modelCode: "output_power_limit",
@@ -485,11 +531,20 @@ const DEVICE_MORE_POINTS = [
     valueKeys: ["output_power_limit"],
   },
   {
+    label: "输入限制",
     dpId: "69",
     dpCode: "inverter_input_power_limit",
     modelCode: "inverter_input_power_limit",
     unit: "W",
     valueKeys: ["inverter_input_power_limit"],
+  },
+  {
+    label: "局域网电表配对功率",
+    dpId: "26",
+    dpCode: "grid_power",
+    modelCode: "meter_power",
+    unit: "W",
+    valueKeys: ["meter_power", "grid_power"],
   },
 ];
 
@@ -499,10 +554,14 @@ function schemaEntryByDpId(schema, dpId) {
   return Object.values(schema || {}).find((e) => String(e?.dpId) === id) || null;
 }
 
+/**
+ * @brief Resolve schema hit for inSchema; table columns always use catalog mapping
+ */
 function morePointDisplay(device, point) {
   const schema = device?.schema || {};
   if (point.dpCode === "function_set") {
     return {
+      label: point.label || point.modelCode,
       dpId: point.dpId,
       dpCode: point.dpCode,
       modelCode: point.modelCode,
@@ -516,9 +575,10 @@ function morePointDisplay(device, point) {
     (point.valueKeys || []).map((k) => schema[k]).find(Boolean) ||
     null;
   return {
-    dpId: hit?.dpId || point.dpId,
-    dpCode: hit?.dpCode || point.dpCode,
-    modelCode: hit?.dpCode || point.modelCode,
+    label: point.label || point.modelCode,
+    dpId: point.dpId,
+    dpCode: point.dpCode,
+    modelCode: point.modelCode,
     inSchema: !!hit,
   };
 }
@@ -573,6 +633,7 @@ function openDevicePointsDialog(home, device) {
       raw == null;
     const rowMissing = missing || fsMissing;
     return `<tr class="${rowMissing ? "point-missing" : ""}">
+      <td><span class="point-dim">${escapeHtml(shown.label)}</span></td>
       <td>${escapeHtml(shown.dpId)}</td>
       <td><code>${escapeHtml(shown.dpCode)}</code></td>
       <td><code>${escapeHtml(shown.modelCode)}</code></td>
@@ -595,14 +656,23 @@ function switchDevicePointsTab(tab) {
   if (!points) loadDeviceVersionPanel();
 }
 
+/**
+ * @brief Unwrap backendng /api/device/detail payload → result object
+ * @param[in] payload proxy or upstream JSON
+ * @return {{ dataPoints?: Array, deviceMetaShowVOList?: Array, modules?: Array }}
+ */
+function unwrapDeviceDetail(payload) {
+  const root = unwrapResult(payload);
+  return root && typeof root === "object" ? root : {};
+}
+
+/**
+ * @brief WiFi / MCU versions from device detail modules[]
+ * @param[in] payload proxy JSON or detail result
+ * @return {{ wifi: string, mcu: string }}
+ */
 function parseWifiMcuVersions(payload) {
-  const data = payload?.data ?? payload;
-  const root =
-    data?.result && typeof data.result === "object"
-      ? data.result
-      : data?.data && typeof data.data === "object"
-        ? data.data
-        : data;
+  const root = unwrapDeviceDetail(payload);
   const modules = Array.isArray(root?.modules)
     ? root.modules
     : Array.isArray(root?.moduleList)
@@ -621,6 +691,49 @@ function parseWifiMcuVersions(payload) {
     else if (key === "mcu") mcu = ver;
   }
   return { wifi, mcu };
+}
+
+/**
+ * @brief Read deviceMetaShowVOList entry by code (e.g. ssid_hash)
+ * @param[in] payload proxy JSON, detail result, or meta list
+ * @param[in] code meta code
+ * @return string value or ""
+ */
+function parseDeviceMetaValue(payload, code) {
+  const want = String(code || "").trim().toLowerCase();
+  if (!want) return "";
+  let list = null;
+  if (Array.isArray(payload)) {
+    list = payload;
+  } else {
+    const root = unwrapDeviceDetail(payload);
+    list = root?.deviceMetaShowVOList;
+  }
+  if (!Array.isArray(list)) return "";
+  const hit = list.find((m) => String(m?.code || "").trim().toLowerCase() === want);
+  if (!hit || hit.value == null || hit.value === "") return "";
+  return String(hit.value);
+}
+
+/**
+ * @brief Index device-detail dataPoints for DP matching (replaces shadowProperty list)
+ * @param[in] dataPoints detail.result.dataPoints
+ * @return {{ byCode: Object, byId: Object, latest: number|null }}
+ */
+function indexDetailDataPoints(dataPoints) {
+  const byCode = {};
+  const byId = {};
+  let latest = null;
+  const items = Array.isArray(dataPoints) ? dataPoints : [];
+  for (const it of items) {
+    const code = it.code || it.dpCode;
+    if (code) byCode[code] = it;
+    const id = it.dpId != null ? it.dpId : it.propertyId;
+    if (id != null) byId[String(id)] = it;
+    const t = Number(it.time || it.reportTime || 0);
+    if (t && (!latest || t > latest)) latest = t;
+  }
+  return { byCode, byId, latest };
 }
 
 async function fetchDeviceDetail(home, deviceId, _retried = false) {
@@ -658,11 +771,59 @@ async function fetchDeviceDetail(home, deviceId, _retried = false) {
   }
 }
 
-function versionRowHtml(lab, val) {
+/**
+ * @brief Stable color tone for an SSID value (same hash → same color)
+ * @param[in] ssid ssid_hash string
+ * @return {{ color: string, background: string, border: string }|null}
+ */
+function ssidTone(ssid) {
+  const s = String(ssid || "").trim();
+  if (!s) {
+    return null;
+  }
+  const palette = [
+    { color: "#1d4ed8", background: "#dbeafe", border: "#93c5fd" },
+    { color: "#b45309", background: "#ffedd5", border: "#fdba74" },
+    { color: "#047857", background: "#d1fae5", border: "#6ee7b7" },
+    { color: "#7e22ce", background: "#f3e8ff", border: "#d8b4fe" },
+    { color: "#be123c", background: "#ffe4e6", border: "#fda4af" },
+    { color: "#0f766e", background: "#ccfbf1", border: "#5eead4" },
+    { color: "#c2410c", background: "#ffedd5", border: "#fb923c" },
+    { color: "#4338ca", background: "#e0e7ff", border: "#a5b4fc" },
+  ];
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return palette[Math.abs(h) % palette.length];
+}
+
+/**
+ * @brief Inline style for SSID value chip (equal SSIDs share tone)
+ * @param[in] ssid ssid_hash
+ * @return CSS style attribute string (may be empty)
+ */
+function ssidToneStyleAttr(ssid) {
+  const tone = ssidTone(ssid);
+  if (!tone) {
+    return "";
+  }
+  return ` style="color:${tone.color};background:${tone.background};border:1px solid ${tone.border}"`;
+}
+
+function versionRowHtml(lab, val, opts = {}) {
   const empty = !val;
+  const isSsid = String(lab || "").toUpperCase() === "SSID";
+  const toneAttr = !empty && isSsid ? ssidToneStyleAttr(val) : "";
+  const valCls = empty
+    ? "ver-val ver-empty"
+    : isSsid
+      ? "ver-val ver-ssid"
+      : "ver-val";
   return `<div class="ver-row">
     <span class="ver-lab">${escapeHtml(lab)}</span>
-    <span class="ver-val${empty ? " ver-empty" : ""}">${escapeHtml(empty ? "—" : val)}</span>
+    <span class="${valCls}"${toneAttr}>${escapeHtml(empty ? "—" : val)}</span>
   </div>`;
 }
 
@@ -678,9 +839,16 @@ async function loadDeviceVersionPanel() {
   body.innerHTML = `<div class="hint">正在查询版本信息…</div>`;
   try {
     const json = await fetchDeviceDetail(ctx.home, deviceId);
+    const detail = unwrapDeviceDetail(json);
+    applyDeviceDetailMeta(ctx.device, detail);
     const { wifi, mcu } = parseWifiMcuVersions(json);
+    const ssid = ctx.device?.ssidHash || parseDeviceMetaValue(json, "ssid_hash");
+    const ip = ctx.device?.ip || (detail.device && detail.device.ip) || "";
     const html =
-      versionRowHtml("模组版本（WiFi）", wifi) + versionRowHtml("MCU 版本", mcu);
+      versionRowHtml("模组版本（WiFi）", wifi) +
+      versionRowHtml("MCU 版本", mcu) +
+      versionRowHtml("IP", ip) +
+      versionRowHtml("SSID", ssid);
     deviceVersionCache = { deviceId, html };
     body.innerHTML = html;
   } catch (err) {
@@ -2368,7 +2536,9 @@ function normalizeDevice(d) {
     values: {},
     reportTime: null,
     lastReadAt: null, // 仅会话内：本机最近一次成功读取
-    isOnline: d.isOnline == null ? null : !!d.isOnline, // 会话内：家庭设备列表在线态
+    isOnline: d.isOnline == null ? null : !!d.isOnline, // 会话/落盘：detail.online 或列表在线态
+    ip: d.ip ? String(d.ip) : "",
+    ssidHash: d.ssidHash ? String(d.ssidHash) : "",
     schema: d.schema || {},
     protocol: d.protocol || null,
     socSeries: [],
@@ -2398,6 +2568,9 @@ function buildStoreDump() {
         schema: d.schema,
         protocol: d.protocol,
         drafts: d.drafts,
+        isOnline: d.isOnline == null ? null : !!d.isOnline,
+        ip: d.ip || "",
+        ssidHash: d.ssidHash || "",
       })),
       meters: (h.meters || []).map((m) => ({
         uid: m.uid,
@@ -2899,9 +3072,35 @@ function parseDeviceOnline(row) {
 }
 
 /**
- * @brief Whether device can be selected for automation
+ * @brief Apply online / IP / SSID from backendng device detail.result
+ * @param[in,out] device device object
+ * @param[in] detail unwrapped detail result
+ * @return none
+ */
+function applyDeviceDetailMeta(device, detail) {
+  if (!device || !detail || typeof detail !== "object") {
+    return;
+  }
+  const info = detail.device && typeof detail.device === "object" ? detail.device : null;
+  if (info) {
+    const online = parseDeviceOnline(info);
+    if (online != null) {
+      device.isOnline = online;
+    }
+    if (info.ip != null && String(info.ip).trim() !== "") {
+      device.ip = String(info.ip).trim();
+    }
+  }
+  const ssid = parseDeviceMetaValue(detail.deviceMetaShowVOList, "ssid_hash");
+  if (ssid) {
+    device.ssidHash = ssid;
+  }
+}
+
+/**
+ * @brief Whether device can be selected for automation / shows as online
  * @param[in] device device object
- * @return true when online or unknown; false when known offline
+ * @return false when known offline or (unknown + stale report); else true
  */
 function deviceIsOnline(device) {
   if (!device) {
@@ -2909,6 +3108,17 @@ function deviceIsOnline(device) {
   }
   if (device.isOnline === false) {
     return false;
+  }
+  if (device.isOnline === true) {
+    return true;
+  }
+  // homeDevice 常无 online 字段：上报过旧时按离线展示角标，避免误当成在线
+  const t = Number(device.reportTime || 0);
+  if (t > 0) {
+    const ageMs = Date.now() - t;
+    if (Number.isFinite(ageMs) && ageMs > 30 * 60 * 1000) {
+      return false;
+    }
   }
   return true;
 }
@@ -3126,7 +3336,7 @@ async function readDevice(home, device, opts = {}) {
   if (!batch) render();
   let ok = false;
   try {
-    // Refresh only needs shadow + SOC. pid-schema only when本地尚无 schema。
+    // Refresh: device-detail dataPoints (+ SOC). pid-schema only when本地尚无 schema。
     if (!Object.keys(device.schema || {}).length || !device.pid) {
       const schemaRes = await CaseApi.queryPidSchema(home, { devId: device.deviceId });
       const schemaRaw = unwrapResult(schemaRes);
@@ -3143,16 +3353,12 @@ async function readDevice(home, device, opts = {}) {
       ensureHomeWiring(home);
     }
 
-    const propertyList = [];
     const fieldToDp = {};
     const fieldsToRead = [...ALL_FIELDS, ...HOME_SHADOW_FIELDS, ...DP_SHADOW_EXTRA];
     for (const field of fieldsToRead) {
       const entry = resolveSchemaEntry(device.schema, field);
       if (!entry) continue;
       fieldToDp[field.code] = entry;
-      if (!propertyList.some((p) => p.dpId === entry.dpId)) {
-        propertyList.push({ dpId: entry.dpId, dpCode: entry.dpCode });
-      }
     }
 
     const values = { ...(device.values || {}) };
@@ -3161,37 +3367,29 @@ async function readDevice(home, device, opts = {}) {
     }
     let latest = device.reportTime || null;
 
-    if (propertyList.length) {
-      const shadowRes = await CaseApi.queryShadowProperty(home, {
-        devId: device.deviceId,
-        propertyList,
-      });
-      const shadowList = unwrapResult(shadowRes);
-      const items = Array.isArray(shadowList) ? shadowList : shadowList?.items || [];
-      const byCode = {};
-      const byId = {};
-      for (const it of items) {
-        const code = it.code || it.dpCode;
-        if (code) byCode[code] = it;
-        if (it.propertyId != null) byId[String(it.propertyId)] = it;
-        const t = Number(it.time || it.reportTime || 0);
-        if (t && (!latest || t > latest)) latest = t;
-      }
+    // Real-time DPs + SSID/IP/online：backendng /api/device/detail
+    const detailJson = await fetchDeviceDetail(home, device.deviceId);
+    const detail = unwrapDeviceDetail(detailJson);
+    const { byCode, byId, latest: dpLatest } = indexDetailDataPoints(detail.dataPoints);
+    if (dpLatest && (!latest || dpLatest > latest)) latest = dpLatest;
+    applyDeviceDetailMeta(device, detail);
+    if (deviceVersionCache.deviceId === device.deviceId) {
+      deviceVersionCache = { deviceId: "", html: "" };
+    }
 
-      for (const field of fieldsToRead) {
-        const entry = fieldToDp[field.code];
-        if (!entry) continue;
-        const hit =
-          byId[entry.dpId] ||
-          byCode[entry.dpCode] ||
-          (field.aliases || []).map((a) => byCode[a]).find(Boolean);
-        if (!hit) continue;
-        const rawVal = hit.valueObject ?? hit.value ?? hit.dpValue;
-        const display = toDisplayValue(rawVal, entry.dpSchema, field.unit);
-        values[field.code] = display;
-        if (entry.dpCode && entry.dpCode !== field.code) {
-          values[entry.dpCode] = display;
-        }
+    for (const field of fieldsToRead) {
+      const entry = fieldToDp[field.code];
+      if (!entry) continue;
+      const hit =
+        byId[entry.dpId] ||
+        byCode[entry.dpCode] ||
+        (field.aliases || []).map((a) => byCode[a]).find(Boolean);
+      if (!hit) continue;
+      const rawVal = hit.valueObject ?? hit.value ?? hit.dpValue;
+      const display = toDisplayValue(rawVal, entry.dpSchema, field.unit);
+      values[field.code] = display;
+      if (entry.dpCode && entry.dpCode !== field.code) {
+        values[entry.dpCode] = display;
       }
     }
 
@@ -3837,18 +4035,15 @@ function resolveGridNodePower(home) {
 }
 
 async function readMeterShadowLive(home, meter) {
-  /** Real-time power via ops query-shadow-property. */
+  /** Real-time power via backendng device detail dataPoints. */
   const spec = meterDpSpec(meter);
-  const shadowRes = await CaseApi.queryShadowProperty(home, {
-    devId: meter.deviceId,
-    propertyList: [{ dpId: String(spec.dpId), dpCode: spec.dpCode }],
-  });
-  const shadowList = unwrapResult(shadowRes);
-  const items = Array.isArray(shadowList) ? shadowList : shadowList?.items || [];
+  const detailJson = await fetchDeviceDetail(home, meter.deviceId);
+  const detail = unwrapDeviceDetail(detailJson);
+  const { byCode, byId } = indexDetailDataPoints(detail.dataPoints);
   const hit =
-    items.find((it) => String(it.propertyId) === String(spec.dpId)) ||
-    items.find((it) => (it.code || it.dpCode) === spec.dpCode) ||
-    items[0];
+    byId[String(spec.dpId)] ||
+    byCode[spec.dpCode] ||
+    null;
   if (!hit) {
     meter.lastValue = null;
     return;
@@ -3909,7 +4104,7 @@ async function readMeterBizlogHistory(home, meter) {
 
 async function readMeter(home, meter, opts = {}) {
   const batch = !!opts.batch;
-  // 实时功率只走影子；bizlog 仅 charts 页显式 history:true
+  // 实时功率走 device detail dataPoints；bizlog 仅 charts 页显式 history:true
   const wantHistory = opts.history === true;
   meter.loading = true;
   meter.error = null;
@@ -5195,10 +5390,14 @@ function renderDeviceCard(home, device) {
           ${device.pid ? `<span class="dot">·</span><span class="note">PID ${escapeHtml(device.pid)}</span>` : ""}
           ${device.note ? `<span class="dot">·</span><span class="note">${escapeHtml(device.note)}</span>` : ""}
         </div>
+        <div class="version-kv card-meta-kv">
+          ${versionRowHtml("IP", device.ip || "")}
+          ${versionRowHtml("SSID", device.ssidHash || "")}
+        </div>
       </div>
       <div class="card-head-actions">
         <button type="button" class="btn-icon-refresh" data-act="refresh"
-          title="读取该设备（影子 + SOC）" ${device.loading ? "disabled" : ""} aria-label="刷新">
+          title="读取该设备（detail dataPoints + SOC）" ${device.loading ? "disabled" : ""} aria-label="刷新">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <polyline points="23 4 23 10 17 10"></polyline>
@@ -14029,6 +14228,7 @@ async function readAllActiveHome(opts = {}) {
 
   home.lastReadAt = Date.now();
   applyDp98ActualForHome(home);
+  persist();
   render();
 
   const deviceMeterResults = results.slice(0, devices.length + meters.length);

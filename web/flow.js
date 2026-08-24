@@ -531,31 +531,31 @@ function unitCardHtml(g) {
     typeof DP_DISPLAY !== "undefined"
       ? DP_DISPLAY
       : [
-          { code: "pv_power_total", label: "PV", unit: "W", aliases: ["pv_power_total"] },
+          { code: "pv_power_total", label: "PV", unit: "W", aliases: ["pv_power_total", "total_photovoltaic_power"] },
           {
             code: "grid_port_power",
             label: "Grid",
             unit: "W",
             aliases: ["grid_port_power", "inverter_output_power"],
           },
-          { code: "battery_power", label: "电池", unit: "W", aliases: ["battery_power"] },
-          { code: "current_soc", label: "SOC", unit: "%", aliases: ["current_soc", "main_soc"] },
-          { code: "backup_soc", label: "备用", unit: "%", aliases: ["backup_soc", "backup_reserve"] },
+          { code: "battery_power", label: "电池", unit: "W", aliases: ["battery_power", "total_stack_power"] },
+          { code: "current_soc", label: "SOC", unit: "%", aliases: ["current_soc", "main_soc", "heap_soc"] },
+          { code: "backup_soc", label: "备用", unit: "%", aliases: ["backup_soc", "backup_reserve", "min_soc_discharge"] },
           {
-            code: "battery_charging_power_grid",
+            code: "offgrid1_export_power",
             label: "离网口",
             unit: "W",
-            aliases: ["offgrid1_export_power", "battery_charging_power_grid"],
+            aliases: ["offgrid1_export_power"],
           },
         ];
   const editableFields =
     typeof DP_EDITABLE !== "undefined"
       ? DP_EDITABLE
       : [
-          { code: "backup_soc", label: "备用 SOC", unit: "%" },
-          { code: "regulation_grid_export_p_limit", label: "法规输出上限(取小)", unit: "W", useModelMax: true },
-          { code: "output_power_limit", label: "AC输出限制", unit: "W" },
-          { code: "inverter_input_power_limit", label: "AC输入限制", unit: "W" },
+          { code: "backup_soc", label: "备用SOC", unit: "%" },
+          { code: "regulation_grid_export_p_limit", label: "输出最大值", unit: "W", useModelMax: true },
+          { code: "output_power_limit", label: "输出限制", unit: "W" },
+          { code: "inverter_input_power_limit", label: "输入限制", unit: "W" },
         ];
 
   const workModeOpts =
@@ -600,8 +600,8 @@ function unitCardHtml(g) {
       if (f.code === "grid_port_power" && (val == null || val === "")) {
         val = v.inverter_output_power;
       }
-      if (f.code === "battery_charging_power_grid" && (val == null || val === "")) {
-        val = v.offgrid1_export_power;
+      if (f.code === "offgrid1_export_power" && (val == null || val === "")) {
+        val = v.battery_charging_power_grid;
       }
       if (!missing) {
         if (f.code === "pv_power_total") val = g.pv;
@@ -609,7 +609,7 @@ function unitCardHtml(g) {
         if (f.code === "battery_power") val = g.bat;
         if (f.code === "current_soc") val = g.soc;
         if (f.code === "backup_soc") val = g.backup;
-        if (f.code === "battery_charging_power_grid") val = g.load || g.micro || val;
+        if (f.code === "offgrid1_export_power") val = g.load || g.micro || val;
       } else {
         val = null;
       }
@@ -659,6 +659,16 @@ function unitCardHtml(g) {
     ""
   );
   const nodeIdHtml = kv("集群身份", nodeId == null ? null : nodeId, "");
+  const ssidRaw = d.ssidHash != null && d.ssidHash !== "" ? String(d.ssidHash) : null;
+  const ipRaw = d.ip != null && String(d.ip).trim() !== "" ? String(d.ip).trim() : null;
+  const ssidToneAttr =
+    ssidRaw && typeof ssidToneStyleAttr === "function" ? ssidToneStyleAttr(ssidRaw) : "";
+  const ssidHtml = `<div class="kv kv-meta kv-ssid" title="${flowEsc(ssidRaw ? `SSID：${ssidRaw}` : "SSID：—")}"><span class="k">SSID</span><span class="v ver-ssid"${ssidToneAttr}>${
+    ssidRaw ? flowEsc(ssidRaw) : "—"
+  }</span></div>`;
+  const ipHtml = `<div class="kv kv-meta kv-ip" title="${flowEsc(ipRaw ? `IP：${ipRaw}` : "IP：—")}"><span class="k">IP</span><span class="v">${
+    ipRaw ? flowEsc(ipRaw) : "—"
+  }</span></div>`;
 
   // grid 口充放策略：理论状态放在 ④ 工况；上报/决策来自各机本机 DP98
   const owner =
@@ -782,6 +792,8 @@ function unitCardHtml(g) {
         ${famLiveHtml}
         ${clusterHtml}
         ${nodeIdHtml}
+        ${ipHtml}
+        ${ssidHtml}
       </div>
     </div>
     <div class="layer l2">
