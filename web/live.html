@@ -8,7 +8,7 @@
   <link rel="shortcut icon" href="/app-icon-20260806.png" />
   <link rel="apple-touch-icon" href="/app-icon-20260806.png" />
   <link rel="icon" href="/favicon.svg?v=20260806-57" type="image/svg+xml" />
-  <link rel="stylesheet" href="/style.css?v=20260824-caselib134" />
+  <link rel="stylesheet" href="/style.css?v=20260824-caselib137" />
 </head>
 <body>
   <div id="app" class="layout">
@@ -184,7 +184,14 @@
             <h2>数据区登录态</h2>
           </div>
           <div class="loginmgr-actions">
-            <button type="button" class="btn btn-primary" id="btnLoginMgrAuto">自动获取(本机)</button>
+            <label class="loginmgr-remote" title="推送目标虚拟机地址">
+              <span class="loginmgr-remote-label">虚拟机地址</span>
+              <input type="url" id="loginMgrRemoteUrl" class="loginmgr-remote-url"
+                placeholder="http://172.16.239.92:8780" />
+            </label>
+            <button type="button" class="btn btn-primary" id="btnLoginMgrAutoPush"
+              title="本机自动获取 SSO Cookie，并合并推送到下方虚拟机地址">自动获取并推送到虚拟机</button>
+            <button type="button" class="btn btn-ghost" id="btnLoginMgrAuto">仅自动获取</button>
           </div>
         </div>
         <p class="hint" id="loginMgrHint"></p>
@@ -209,7 +216,7 @@
       <div id="remotePushRow" class="remote-push-row hidden">
         <label class="remote-push-label">
           虚拟机地址
-          <input type="url" id="remotePushUrl" placeholder="http://172.16.239.236:5178" />
+          <input type="url" id="remotePushUrl" placeholder="http://172.16.239.92:8780" />
         </label>
         <button type="button" class="btn btn-ghost" id="btnPushCookies" title="把本机已保存的 cookies 推送到虚拟机 store">推送到虚拟机</button>
       </div>
@@ -379,8 +386,8 @@
         </select>
       </label>
       <label class="fld reg-addr-fld">
-        <span>寄存器地址</span>
-        <input type="text" id="regQueryAddr" placeholder="如 4026 或 0x4026" autocomplete="off" />
+        <span>寄存器地址 / 物模型 code</span>
+        <input type="text" id="regQueryAddr" placeholder="如 4026、0x4026 或 parallel_status" autocomplete="off" />
       </label>
       <div class="modal-actions" style="justify-content:flex-start;margin-top:10px">
         <button type="button" class="btn btn-primary" id="btnRegQueryRun">查询</button>
@@ -469,13 +476,13 @@
   <div id="toast" class="toast hidden"></div>
   <script src="/html2canvas.min.js"></script>
   <!-- 层3 checker 固件运行逻辑（对齐 CBE_RESONATE_MASTER）：先于 flow.js/app.js 加载 -->
-  <script src="/checker/device-model.js?v=20260824-caselib134"></script>
-  <script src="/checker/owner-model.js?v=20260824-caselib134"></script>
+  <script src="/checker/device-model.js?v=20260824-caselib137"></script>
+  <script src="/checker/owner-model.js?v=20260824-caselib137"></script>
   <script src="/checker/dp98.js?v=20260818-caselib42"></script>
-  <script src="/checker/cluster.js?v=20260824-caselib134"></script>
-  <script src="/checker/construct-lib.js?v=20260824-caselib134"></script>
-  <script src="/lib/api-client.js?v=20260824-caselib134"></script>
-  <script src="/flow.js?v=20260824-caselib134"></script>
-  <script src="/app.js?v=20260824-caselib134"></script>
+  <script src="/checker/cluster.js?v=20260824-caselib137"></script>
+  <script src="/checker/construct-lib.js?v=20260824-caselib137"></script>
+  <script src="/lib/api-client.js?v=20260824-caselib137"></script>
+  <script src="/flow.js?v=20260824-caselib137"></script>
+  <script src="/app.js?v=20260824-caselib137"></script>
 </body>
 </html>

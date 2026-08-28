@@ -3478,7 +3478,26 @@ button.owner-chip:hover {
 .loginmgr-title { display: flex; align-items: center; gap: 10px; }
 .loginmgr-title h2 { margin: 0; font-size: 18px; }
 .loginmgr-head h3 { margin: 0; }
-.loginmgr-actions { display: flex; gap: 8px; }
+.loginmgr-actions {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end;
+}
+.loginmgr-remote {
+  display: inline-flex; align-items: center; gap: 8px;
+  margin: 0; font-weight: 600; color: var(--text); white-space: nowrap;
+}
+.loginmgr-remote-label {
+  font-size: 12px; color: #475569; flex-shrink: 0;
+}
+.loginmgr-remote-url {
+  width: min(280px, 42vw); min-width: 200px; height: 32px; padding: 0 10px;
+  border: 1px solid var(--border); border-radius: 6px; background: #fff;
+  font-size: 12px; font-weight: 500; font-family: ui-monospace, Menlo, monospace; color: var(--text);
+}
+.loginmgr-remote-url:focus {
+  outline: none; border-color: var(--accent, #2563eb); box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+.loginmgr-remote.hidden,
+.loginmgr-remote-url.hidden { display: none !important; }
 .loginmgr-group { margin-top: 18px; }
 .loginmgr-group > h4 {
   margin: 0 0 8px; font-size: 13px; font-weight: 700; color: var(--text);

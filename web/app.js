@@ -288,6 +288,24 @@ const DEVICE_MODEL_READONLY = [
     via: "function_set",
     unit: "",
   },
+  {
+    code: "parallel_cluster_node_id",
+    label: "并机身份id",
+    via: "function_set",
+    unit: "",
+  },
+  {
+    code: "parallel_status",
+    label: "并机状态",
+    via: "function_set",
+    unit: "",
+  },
+  {
+    code: "controller_sn_serial_number",
+    label: "sn",
+    via: "serial_number",
+    unit: "",
+  },
 ];
 
 /** 所有需从 property-query 拉取的物模型 code */
@@ -312,13 +330,27 @@ function clusterRoleLabel(raw) {
 }
 
 /**
+ * parallel_status 文案（并机状态）。
+ * @returns {string|null}
+ */
+function parallelStatusLabel(raw) {
+  if (raw == null || raw === "") return null;
+  const n = Number(raw);
+  if (n === 0) return "未并机";
+  if (n === 1) return "并机中";
+  if (n === 2) return "并机完成";
+  if (Number.isFinite(n)) return `状态${n}`;
+  return String(raw);
+}
+
+/**
  * 集群身份 id（function_set / device_cluster_node_id）。
  * @returns {string|null} 有值返回规范化字符串；空/未读返回 null（按单机）
  */
 function deviceClusterNodeId(deviceOrRaw) {
   const raw =
     deviceOrRaw && typeof deviceOrRaw === "object"
-      ? deviceOrRaw.values?.device_cluster_node_id
+      ? deviceOrRaw.values?.parallel_cluster_node_id ?? deviceOrRaw.values?.device_cluster_node_id
       : deviceOrRaw;
   if (raw == null || raw === "") return null;
   const s = String(raw).trim();
@@ -451,6 +483,30 @@ const DEVICE_MORE_POINTS = [
     valueKeys: ["device_cluster_node_id"],
   },
   {
+    label: "并机身份id",
+    dpId: "52",
+    dpCode: "function_set",
+    modelCode: "parallel_cluster_node_id",
+    unit: "",
+    valueKeys: ["parallel_cluster_node_id", "device_cluster_node_id"],
+  },
+  {
+    label: "并机状态",
+    dpId: "52",
+    dpCode: "function_set",
+    modelCode: "parallel_status",
+    unit: "",
+    valueKeys: ["parallel_status"],
+  },
+  {
+    label: "sn",
+    dpId: "1",
+    dpCode: "serial_number",
+    modelCode: "controller_sn_serial_number",
+    unit: "",
+    valueKeys: ["controller_sn_serial_number"],
+  },
+  {
     label: "家庭-基础负载功率",
     dpId: "91",
     dpCode: "base_load",
@@ -568,6 +624,15 @@ function morePointDisplay(device, point) {
       inSchema: !!(schema.function_set || schema[point.modelCode]),
     };
   }
+  if (point.dpCode === "serial_number") {
+    return {
+      label: point.label || point.modelCode,
+      dpId: point.dpId,
+      dpCode: point.dpCode,
+      modelCode: point.modelCode,
+      inSchema: !!(schema.serial_number || schema[point.modelCode]),
+    };
+  }
   const hit =
     schemaEntryByDpId(schema, point.dpId) ||
     schema[point.dpCode] ||
@@ -596,6 +661,10 @@ function formatPointValue(raw, point) {
   if (point.modelCode === "device_cluster_role") {
     const role = clusterRoleLabel(raw);
     return role ? `${role} (${raw})` : String(raw);
+  }
+  if (point.modelCode === "parallel_status") {
+    const txt = parallelStatusLabel(raw);
+    return txt ? `${txt}${raw != null && raw !== "" ? ` (${raw})` : ""}` : String(raw);
   }
   if (point.dpCode === "work_mode" || point.modelCode === "work_mode") {
     const field = HOME_FAMILY_FIELDS.find((f) => f.code === "work_mode");
@@ -863,6 +932,24 @@ function normalizeRegAddrInput(raw) {
   s = s.replace(/^0x/i, "").replace(/\s+/g, "");
   if (!/^[0-9a-fA-F]+$/.test(s)) return "";
   return s.toLowerCase().replace(/^0+(?=[0-9a-f])/, "") || "0";
+}
+
+/**
+ * Parse register-query input: hex register or model code.
+ * @returns {{kind:'empty'|'invalid'|'register'|'code', regHex?:string, code?:string}}
+ */
+function parseRegQueryInput(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return { kind: "empty" };
+  if (/^[a-zA-Z][a-zA-Z0-9_]*$/.test(s)) {
+    return { kind: "code", code: s };
+  }
+  const regHex = normalizeRegAddrInput(s);
+  if (regHex && /^0x?[0-9a-fA-F\s]+$/.test(s)) {
+    return { kind: "register", regHex };
+  }
+  if (regHex) return { kind: "register", regHex };
+  return { kind: "invalid" };
 }
 
 let regQueryCtx = null; // { home, device, protocol }
@@ -1477,10 +1564,16 @@ async function runRegQuery() {
   const btn = document.getElementById("btnRegQueryRun");
   const resultEl = document.getElementById("regQueryResult");
   const addrRaw = document.getElementById("regQueryAddr")?.value || "";
-  const regHex = normalizeRegAddrInput(addrRaw);
-  if (!regHex) {
-    toast("请输入有效寄存器地址（如 4026 或 0x4026）", "error");
+  const parsed = parseRegQueryInput(addrRaw);
+  if (parsed.kind === "empty" || parsed.kind === "invalid") {
+    toast("请输入有效寄存器地址（如 4026）或物模型 code（如 parallel_status）", "error");
     return;
+  }
+  if (regQueryMode === "bizlog") {
+    if (parsed.kind !== "register") {
+      toast("DP 原始报文模式仅支持寄存器地址", "error");
+      return;
+    }
   }
   if (regQueryMode === "bizlog" && !resolveRegQueryDpIds()) {
     toast("请选择 type=raw 的 DP", "error");
@@ -1491,7 +1584,7 @@ async function runRegQuery() {
   try {
     if (regQueryMode === "bizlog") {
       const dpIds = resolveRegQueryDpIds();
-      const reg = parseInt(regHex, 16);
+      const reg = parseInt(parsed.regHex, 16);
       if (!Number.isFinite(reg)) throw new Error("寄存器地址无效");
       const data = await searchBizlogRegister(ctx.home, ctx.device.deviceId, { reg, dpIds });
       setRegQueryResult(renderBizlogRegResult(data), true);
@@ -1504,22 +1597,38 @@ async function runRegQuery() {
       ctx.protocol = protocol;
       renderRegQueryMeta(protocol);
     }
-    const looked = await lookupCodeByRegister(ctx.home, protocol, regHex);
-    const prop = await fetchPropertyByCode(ctx.home, ctx.device, looked.code);
+    let code = "";
+    let regHex = "";
+    let lookupHit = null;
+    let lookupList = [];
+    if (parsed.kind === "code") {
+      code = parsed.code;
+    } else {
+      regHex = parsed.regHex;
+      const looked = await lookupCodeByRegister(ctx.home, protocol, regHex);
+      code = looked.code;
+      lookupHit = looked.hit;
+      lookupList = looked.list;
+    }
+    const prop = await fetchPropertyByCode(ctx.home, ctx.device, code);
     const hit = prop.hit;
     const value =
       hit == null
         ? null
         : hit.valueObject ?? hit.value ?? hit.dpValue ?? hit.propertyValue ?? null;
+    if (!regHex) {
+      const addr = parseRegAddr(hit?.model?.strategySpec || lookupHit?.model?.strategySpec);
+      if (addr != null) regHex = addr.toString(16);
+    }
     const lines = [
-      `寄存器: 0x${regHex}`,
-      `code: ${looked.code}`,
-      `名称: ${hit?.name || looked.hit?.name || "—"}`,
+      regHex ? `寄存器: 0x${regHex}` : "寄存器: —",
+      `code: ${code}`,
+      `名称: ${hit?.name || lookupHit?.name || "—"}`,
       `值: ${value == null || value === "" ? "—" : typeof value === "object" ? JSON.stringify(value) : value}`,
       `时间: ${hit?.time || hit?.reportTime || hit?.gmtModified || "—"}`,
     ];
-    if (looked.list.length > 1) {
-      lines.push(`(协议模型命中 ${looked.list.length} 条，已取 ${looked.code})`);
+    if (lookupList.length > 1) {
+      lines.push(`(协议模型命中 ${lookupList.length} 条，已取 ${code})`);
     }
     resultEl.textContent = lines.join("\n");
     toast("查询完成", "ok");
@@ -7573,10 +7682,11 @@ function isLocalHostPage() {
 }
 
 const REMOTE_PUSH_URL_KEY = "groupAppControl.remotePushUrl";
-const DEFAULT_REMOTE_PUSH_URL = "http://172.16.239.236:5178";
+const DEFAULT_REMOTE_PUSH_URL = "http://172.16.239.92:8780";
 
 function getRemotePushUrl() {
-  const input = document.getElementById("remotePushUrl");
+  const input =
+    document.getElementById("loginMgrRemoteUrl") || document.getElementById("remotePushUrl");
   const fromInput = (input?.value || "").trim();
   if (fromInput) return fromInput.replace(/\/$/, "");
   try {
@@ -7603,11 +7713,26 @@ function renderLoginMgr() {
   const hint = document.getElementById("loginMgrHint");
   if (hint) {
     hint.textContent = onLocal
-      ? "同一 SSO 在 .tuya-inc.com 域内通用，「自动获取(本机)」一次填充全部环境；也可逐行「编辑」手动粘贴。"
-      : "虚拟机页面无法自动获取：请逐行「编辑」粘贴 Cookie，或在本机自动获取后推送到虚拟机。";
+      ? "同一 SSO 在 .tuya-inc.com 域内通用。推荐点「自动获取并推送到虚拟机」；也可「仅自动获取」后改地址再推，或逐行「编辑」粘贴。"
+      : "虚拟机页面无法自动获取：请逐行「编辑」粘贴 Cookie，或在本机打开本页后点「自动获取并推送到虚拟机」。";
   }
   const autoBtn = document.getElementById("btnLoginMgrAuto");
   if (autoBtn) autoBtn.classList.toggle("hidden", !onLocal);
+  const autoPushBtn = document.getElementById("btnLoginMgrAutoPush");
+  if (autoPushBtn) autoPushBtn.classList.toggle("hidden", !onLocal);
+  const remoteInput = document.getElementById("loginMgrRemoteUrl");
+  const remoteWrap = remoteInput?.closest(".loginmgr-remote") || remoteInput;
+  if (remoteWrap) remoteWrap.classList.toggle("hidden", !onLocal);
+  if (remoteInput) {
+    if (onLocal && !String(remoteInput.value || "").trim()) {
+      try {
+        remoteInput.value =
+          localStorage.getItem(REMOTE_PUSH_URL_KEY) || DEFAULT_REMOTE_PUSH_URL;
+      } catch (_) {
+        remoteInput.value = DEFAULT_REMOTE_PUSH_URL;
+      }
+    }
+  }
   let html = "";
   for (const g of LOGIN_GROUPS) {
     const rows = Object.entries(g.envs);
@@ -12569,7 +12694,7 @@ async function pushCookiesToRemote(opts = {}) {
   }
   const remote = (opts.url || getRemotePushUrl()).replace(/\/$/, "");
   if (!remote) {
-    const msg = "请填写虚拟机地址，例如 http://172.16.239.236:5178";
+    const msg = "请填写虚拟机地址，例如 http://172.16.239.92:8780";
     if (!quiet) toast(msg, "error");
     throw new Error(msg);
   }
@@ -13685,6 +13810,33 @@ function bindEvents() {
       btn.disabled = false;
       btn.textContent = prev;
       renderLoginMgr();
+    }
+  });
+  document.getElementById("btnLoginMgrAutoPush")?.addEventListener("click", async () => {
+    const btn = document.getElementById("btnLoginMgrAutoPush");
+    if (!btn) return;
+    const prev = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "获取并推送中…";
+    try {
+      const remoteInput = document.getElementById("loginMgrRemoteUrl");
+      const remote = (remoteInput?.value || getRemotePushUrl() || "").trim().replace(/\/$/, "");
+      if (remoteInput && remote) remoteInput.value = remote;
+      await pushCookiesToRemote({ url: remote, refreshFirst: true });
+    } catch (_) {
+      /* toast shown inside */
+    } finally {
+      btn.disabled = false;
+      btn.textContent = prev;
+      renderLoginMgr();
+    }
+  });
+  document.getElementById("loginMgrRemoteUrl")?.addEventListener("change", (e) => {
+    const v = String(e.target.value || "").trim().replace(/\/$/, "");
+    try {
+      if (v) localStorage.setItem(REMOTE_PUSH_URL_KEY, v);
+    } catch (_) {
+      /* ignore */
     }
   });
   document.getElementById("loginMgrBody")?.addEventListener("click", (e) => {

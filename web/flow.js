@@ -659,6 +659,27 @@ function unitCardHtml(g) {
     ""
   );
   const nodeIdHtml = kv("集群身份", nodeId == null ? null : nodeId, "");
+  const parallelNodeRaw =
+    v.parallel_cluster_node_id != null && v.parallel_cluster_node_id !== ""
+      ? v.parallel_cluster_node_id
+      : nodeId;
+  const parallelNodeHtml = kv("并机身份", parallelNodeRaw == null ? null : parallelNodeRaw, "");
+  const parallelStatusRaw = v.parallel_status;
+  const parallelStatusTxt =
+    parallelStatusRaw == null || parallelStatusRaw === ""
+      ? null
+      : typeof parallelStatusLabel === "function"
+        ? parallelStatusLabel(parallelStatusRaw)
+        : String(parallelStatusRaw);
+  const parallelStatusHtml = kv(
+    "并机状态",
+    parallelStatusTxt == null
+      ? null
+      : `${parallelStatusTxt}${parallelStatusRaw != null && parallelStatusRaw !== "" ? ` (${parallelStatusRaw})` : ""}`,
+    ""
+  );
+  const snRaw = v.controller_sn_serial_number;
+  const snHtml = kv("SN", snRaw == null || snRaw === "" ? null : String(snRaw), "");
   const ssidRaw = d.ssidHash != null && d.ssidHash !== "" ? String(d.ssidHash) : null;
   const ipRaw = d.ip != null && String(d.ip).trim() !== "" ? String(d.ip).trim() : null;
   const ssidToneAttr =
@@ -792,6 +813,9 @@ function unitCardHtml(g) {
         ${famLiveHtml}
         ${clusterHtml}
         ${nodeIdHtml}
+        ${parallelNodeHtml}
+        ${parallelStatusHtml}
+        ${snHtml}
         ${ipHtml}
         ${ssidHtml}
       </div>
