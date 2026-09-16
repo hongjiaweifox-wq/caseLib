@@ -662,7 +662,7 @@ function unitCardHtml(g) {
   const parallelNodeRaw =
     v.parallel_cluster_node_id != null && v.parallel_cluster_node_id !== ""
       ? v.parallel_cluster_node_id
-      : nodeId;
+      : null;
   const parallelNodeHtml = kv("并机身份", parallelNodeRaw == null ? null : parallelNodeRaw, "");
   const parallelStatusRaw = v.parallel_status;
   const parallelStatusTxt =

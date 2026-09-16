@@ -65,27 +65,21 @@ const ENV_CONFIG = {
   "127.0.0.1": { name: "本机", short: "Local", region: "local", supported: true },
 };
 
-/** Hestia hosts for meter bizlog */
+/** Hestia hosts for meter bizlog（预发与线上是同一地址，无独立预发域名，统一走线上域名） */
 const HESTIA_ENVS = {
   "hestia-cn.tuya-inc.com": { name: "Hestia 中国线上", short: "H-CN", region: "cn" },
-  "hestia-cn.wgine-inc.com": { name: "Hestia 中国预发", short: "H-CN-Pre", region: "cn" },
   "hestia-eu.tuya-inc.com": { name: "Hestia 欧洲线上", short: "H-EU", region: "eu" },
-  "hestia-eu.wgine-inc.com": { name: "Hestia 欧洲预发", short: "H-EU-Pre", region: "eu" },
   "hestia-us.tuya-inc.com": { name: "Hestia 美国线上", short: "H-US", region: "us" },
-  "hestia-us.wgine-inc.com": { name: "Hestia 美国预发", short: "H-US-Pre", region: "us" },
   "hestia-sg.tuya-inc.com": { name: "Hestia 新加坡线上", short: "H-SG", region: "sg" },
   "hestia-weaz.tuya-inc.com": { name: "Hestia 西欧线上", short: "H-WEAZ", region: "weaz" },
   "hestia-ueaz.tuya-inc.com": { name: "Hestia 美东线上", short: "H-UEAZ", region: "ueaz" },
 };
 
-/** backendng hosts（家庭设备列表 /inner/backendng/device/homeDevice） */
+/** backendng hosts（家庭设备列表 /inner/backendng/device/homeDevice；预发与线上是同一地址，统一走线上域名） */
 const BACKENDNG_ENVS = {
   "backendng-cn.tuya-inc.com": { name: "backendng 中国线上", short: "B-CN", region: "cn" },
-  "backendng-cn.wgine-inc.com": { name: "backendng 中国预发", short: "B-CN-Pre", region: "cn" },
   "backendng-eu.tuya-inc.com": { name: "backendng 欧洲线上", short: "B-EU", region: "eu" },
-  "backendng-eu.wgine-inc.com": { name: "backendng 欧洲预发", short: "B-EU-Pre", region: "eu" },
   "backendng-us.tuya-inc.com": { name: "backendng 美国线上", short: "B-US", region: "us" },
-  "backendng-us.wgine-inc.com": { name: "backendng 美国预发", short: "B-US-Pre", region: "us" },
   "backendng-sg.tuya-inc.com": { name: "backendng 新加坡线上", short: "B-SG", region: "sg" },
   "backendng-weaz.tuya-inc.com": { name: "backendng 西欧线上", short: "B-WEAZ", region: "weaz" },
   "backendng-ueaz.tuya-inc.com": { name: "backendng 美东线上", short: "B-UEAZ", region: "ueaz" },
@@ -344,13 +338,13 @@ function parallelStatusLabel(raw) {
 }
 
 /**
- * 集群身份 id（function_set / device_cluster_node_id）。
+ * 集群身份 id（function_set / device_cluster_node_id，并机 id 仅作兜底）。
  * @returns {string|null} 有值返回规范化字符串；空/未读返回 null（按单机）
  */
 function deviceClusterNodeId(deviceOrRaw) {
   const raw =
     deviceOrRaw && typeof deviceOrRaw === "object"
-      ? deviceOrRaw.values?.parallel_cluster_node_id ?? deviceOrRaw.values?.device_cluster_node_id
+      ? deviceOrRaw.values?.device_cluster_node_id ?? deviceOrRaw.values?.parallel_cluster_node_id
       : deviceOrRaw;
   if (raw == null || raw === "") return null;
   const s = String(raw).trim();
@@ -488,7 +482,7 @@ const DEVICE_MORE_POINTS = [
     dpCode: "function_set",
     modelCode: "parallel_cluster_node_id",
     unit: "",
-    valueKeys: ["parallel_cluster_node_id", "device_cluster_node_id"],
+    valueKeys: ["parallel_cluster_node_id"],
   },
   {
     label: "并机状态",
@@ -806,9 +800,9 @@ function indexDetailDataPoints(dataPoints) {
 }
 
 async function fetchDeviceDetail(home, deviceId, _retried = false) {
-  const region = (ENV_CONFIG[home.envHost] || {}).region || "cn";
-  const bnHost = `backendng-${region}.tuya-inc.com`;
-  const cookie = resolveCookie(home.envHost);
+  const bnHost = backendngHostForHome(home);
+  // backendng 走线上域名，必须带 tuya-inc.com 域的 cookie（预发家庭的 wgine cookie 在此无效）
+  const cookie = resolveCookie(bnHost);
   const { text } = await CaseApi.getDeviceDetail(bnHost, cookie, deviceId);
   let json;
   try {
@@ -2756,24 +2750,36 @@ function envShort(host) {
   return e ? e.short : host;
 }
 
-/** Map home ops env → matching Hestia host (same region, prod/pre aligned). */
+/** Map home ops env → matching Hestia host (same region; 预发与线上同址，统一走线上域名). */
 function hestiaHostForEnv(envHost) {
   const meta = ENV_CONFIG[envHost];
   const region = meta?.region;
   if (!region || region === "local") {
     return "hestia-cn.tuya-inc.com";
   }
-  const isPre = String(envHost).includes("wgine");
   const candidates = Object.entries(HESTIA_ENVS).filter(([, m]) => m.region === region);
   if (!candidates.length) return "hestia-eu.tuya-inc.com";
-  const prefer = candidates.find(([h]) =>
-    isPre ? h.includes("wgine") : h.includes("tuya-inc.com") && !h.includes("wgine")
-  );
-  return (prefer || candidates[0])[0];
+  return candidates[0][0];
 }
 
 function hestiaHostForHome(home) {
   return hestiaHostForEnv(home?.envHost);
+}
+
+/** Map home ops env → matching backendng host (预发与线上同址，统一走线上域名，与家庭环境无关). */
+function backendngHostForEnv(envHost) {
+  const meta = ENV_CONFIG[envHost];
+  const region = meta?.region;
+  if (!region || region === "local") {
+    return "backendng-cn.tuya-inc.com";
+  }
+  const candidates = Object.entries(BACKENDNG_ENVS).filter(([, m]) => m.region === region);
+  if (!candidates.length) return "backendng-eu.tuya-inc.com";
+  return candidates[0][0];
+}
+
+function backendngHostForHome(home) {
+  return backendngHostForEnv(home?.envHost);
 }
 
 function homeDisplayName(home) {
@@ -3010,7 +3016,15 @@ function assertProxyPayload(json) {
 
 function resolveCookie(host) {
   if (state.cookies[host]) return state.cookies[host];
-  // fallback: any cookie (SSO often works across hestia/ops)
+  // fallback: 优先同域名族的 cookie（SSO 在 .tuya-inc.com / .wgine-inc.com 域内各自共享）
+  const h = String(host);
+  const fam = h.endsWith("wgine-inc.com") ? "wgine-inc.com" : h.includes("tuya-inc.com") ? "tuya-inc.com" : "";
+  if (fam) {
+    for (const [slot, v] of Object.entries(state.cookies)) {
+      if (v && String(v).trim() && String(slot).endsWith(fam)) return v;
+    }
+  }
+  // 最后兜底：任意 cookie（SSO often works across hestia/ops）
   for (const v of Object.values(state.cookies)) {
     if (v && String(v).trim()) return v;
   }
@@ -3123,11 +3137,10 @@ if (typeof CaseApi !== "undefined" && CaseApi.bindTransport) {
   });
 }
 
-/** 家庭设备列表：backendng-<region>.tuya-inc.com /inner/backendng/device/homeDevice */
+/** 家庭设备列表：backendng 预发与线上同址，统一走线上域名；cookie 用目标域名自己的（域内 SSO 共享） */
 async function fetchHomeDevices(home) {
-  const region = (ENV_CONFIG[home.envHost] || {}).region || "cn";
-  const bnHost = `backendng-${region}.tuya-inc.com`;
-  const cookie = resolveCookie(home.envHost); // SSO 是 .tuya-inc.com 域级，operation host 的 cookie 对 backendng 也有效
+  const bnHost = backendngHostForHome(home);
+  const cookie = resolveCookie(bnHost);
   const out = [];
   let offset = 0;
   const limit = 50;
